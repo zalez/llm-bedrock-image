@@ -1,0 +1,22 @@
+[project]
+name = "llm-bedrock-image"
+version = "0.1.1"
+
+description = "An llm plugin for supporting image generators on Amazon Bedrock."
+readme = "README.md"
+authors = [{name = "Constantin Gonzalez"}]
+license = {text = "Apache-2.0"}
+classifiers = [
+    "License :: OSI Approved :: Apache Software License"
+]
+
+dependencies = [
+    "llm",
+    "boto3 >=1.34.55",
+]
+
+[project.urls]
+Homepage = "https://github.com/zalez/llm-bedrock-image"
+
+[project.entry-points.llm]
+bedrock_image = "llm_bedrock_image"
