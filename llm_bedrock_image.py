@@ -6,6 +6,9 @@ This plugin adds support for image generation models on Amazon Bedrock.
 
 See the llm Plugins documentation on how to add this plugin to your installation of llm:
 https://llm.datasette.io/en/stable/plugins/index.html
+
+See the Amazon Bedrock documentation for more information on models and parameters.
+https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html
 """
 
 
@@ -21,6 +24,13 @@ from typing import Optional, Union
 import llm
 import boto3
 from pydantic import field_validator, Field
+
+
+# Constants
+
+MAX_SEED = 2147483646
+MAX_NUMBER_OF_IMAGES = 5
+
 
 # Functions
 
@@ -42,20 +52,59 @@ def register_models(register):
 # Classes
 
 class BedrockImage(llm.Model):
-    can_stream = False  # We don't support streaming.
+    can_stream = True  # Yield updates while saving images if streaming.
 
     class Options(llm.Options):
         bedrock_image_open: Optional[Union[str, bool]] = Field(
-            description="Whether to automatically open images after generating (true, false, 0, 1).",
-            default="true"
+            description='Whether to automatically open images after generating (true, false, 0, 1).',
+            default=True
         )
-        @field_validator("bedrock_image_open")
+        bedrock_image_negative_prompt: Optional[str] = Field(
+            description='Additional prompt with things to avoid generating.',
+            default=None
+        )
+        bedrock_image_seed: Optional[int] = Field(
+            description='Use to control and reproduce results. Determines the initial noise setting. Use the same ' +
+                        'seed and the same settings as a previous run to allow inference to create a similar image.',
+            default=None
+        )
+        bedrock_image_number_of_images: Optional[int] = Field(
+            description='Number of images to generate.',
+            default=None
+        )
+
+        @field_validator('bedrock_image_open')
         def validate_bedrock_image_open(cls, value):
             if value is None:
                 return None
             if str(value).lower() not in ['true', 'false', '0', '1']:
-                raise ValueError("bedrock_image_open must be one of true, false, 0, 1.")
+                raise ValueError('bedrock_image_open must be one of true, false, 0, 1.')
             return str(value).lower() in ['true', '1']
+        @field_validator('bedrock_image_negative_prompt')
+        def validate_bedrock_image_negative_prompt(cls, value):
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                raise ValueError('bedrock_image_negative_prompt must be a string.')
+            return value
+        @field_validator('bedrock_image_seed')
+        def validate_bedrock_image_seed(cls, value):
+            if value is None:
+                return None
+            if not isinstance(value, int):
+                raise ValueError('bedrock_image_seed must be an integer.')
+            if value < 0 or value > MAX_SEED:
+                raise ValueError(f'bedrock_image_seed must be between 0 and {MAX_SEED}.')
+            return value
+        @field_validator('bedrock_image_number_of_images')
+        def validate_bedrock_image_number_of_images(cls, value):
+            if value is None:
+                return None
+            if not isinstance(value, int):
+                raise ValueError('bedrock_image_number_of_images must be an integer.')
+            if value < 1 or value > MAX_NUMBER_OF_IMAGES:
+                raise ValueError(f'bedrock_image_number_of_images must be between 1 and {MAX_NUMBER_OF_IMAGES}.')
+            return value
 
     def __init__(self, model_id):
         self.model_id = model_id
@@ -73,12 +122,21 @@ class BedrockImage(llm.Model):
                 "Generator G1 models is 512 characters."
             )
 
-        return {
-            "taskType": "TEXT_IMAGE",
-            "textToImageParams": {
-                "text": prompt.prompt
-            }
+        params= {
+            'taskType': 'TEXT_IMAGE',
+            'textToImageParams': {
+                'text': prompt.prompt
+            },
+            'imageGenerationConfig': {}
         }
+        if prompt.options.bedrock_image_negative_prompt:
+            params["textToImageParams"]["negativeText"] = prompt.options.bedrock_image_negative_prompt
+        if prompt.options.bedrock_image_seed:
+            params['imageGenerationConfig']['seed'] = prompt.options.bedrock_image_seed
+        if prompt.options.bedrock_image_number_of_images:
+            params['imageGenerationConfig']['numberOfImages'] = prompt.options.bedrock_image_number_of_images
+
+        return params
 
     @staticmethod
     def prompt_to_filename(prompt):
@@ -88,21 +146,27 @@ class BedrockImage(llm.Model):
         :param prompt: A llm prompt object.
         :return: A file name string.
         """
-        result = ""
+        base = ""
+        ext = ".png"
         for c in prompt.prompt:
             if c.isalnum():
-                result += c
+                base += c
             else:
-                result += "_"
+                base += "_"
 
-        while "__" in result:
-            result = result.replace("__", "_")
+        while "__" in base:
+            base = base.replace("__", "_")
 
-        result = result.strip('_')
+        base = base.strip('_')
 
-        result += ".png"
+        # Avoid overwriting existing files with the same name.
+        i = 1
+        path = base + ext
+        while os.path.exists(path):
+            path = base + f"_{i}" + ext
+            i += 1
 
-        return result
+        return path
 
     @staticmethod
     def open_file(path):
@@ -132,12 +196,14 @@ class BedrockImage(llm.Model):
         :param prompt: The prompt object we’re given from llm.
         :param stream: Whether we're streaming output or not.
         :param response: A llm response object for storing response details.
-        :param conversation: A llm conversation object with the conversation history (if any).
+        :param conversation: A llm conversation object with the conversation history (if any) (unused).
         :return: None. Use yield to return results.
         """
-
         params = self.prompt_to_titan_params(prompt)
         bedrock = boto3.client("bedrock-runtime")
+
+        if stream:
+            yield "Generating image...\n"
 
         bedrock_response = bedrock.invoke_model(
             modelId=self.model_id,
@@ -147,19 +213,30 @@ class BedrockImage(llm.Model):
         )
 
         response_body = json.loads(bedrock_response.get("body").read())
-        image_data = response_body.get("images")[0]
-        image_bytes = base64.b64decode(image_data)
-        image_filename = self.prompt_to_filename(prompt)
 
-        # Remove image from response body and log the rest.
-        for i in range(len(response_body['images'])):
+        # Process each image and remove them from the body, so we can log the rest without the
+        # bulky image data.
+
+        file_names = []
+        for i, image_data in enumerate(response_body.get("images")):
+            image_bytes = base64.b64decode(image_data)
+            image_filename = self.prompt_to_filename(prompt)
+            with open(image_filename, "wb") as fp:
+                fp.write(image_bytes)
+
+            if prompt.options.bedrock_image_open:
+                self.open_file(image_filename)
+
             response_body['images'][i] = f'<image data {i + 1}>'
+
+            file_names.append(image_filename)
+            if stream:
+                yield f"Image written to: {image_filename}\n"
+
+        # Log the rest of the response body in case there's more useful information in it.
         response.response_json = json.dumps(response_body)
-
-        with open(image_filename, "wb") as fp:
-            fp.write(image_bytes)
-
-        if prompt.options.bedrock_image_open:
-            self.open_file(image_filename)
-
-        yield f"Result image written to: {image_filename}"
+        if not stream:
+            if len(file_names) == 1:
+                yield 'Image written to: ' + file_names[0] + '\n'
+            else:
+                yield 'Images written to:\n' + '\n    '.join(file_names) + '\n'
