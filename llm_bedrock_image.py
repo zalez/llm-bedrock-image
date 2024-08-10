@@ -13,10 +13,14 @@ https://llm.datasette.io/en/stable/plugins/index.html
 
 import json
 import base64
+import subprocess
+import os
+import platform
+from typing import Optional, Union
 
 import llm
 import boto3
-
+from pydantic import field_validator, Field
 
 # Functions
 
@@ -39,6 +43,19 @@ def register_models(register):
 
 class BedrockImage(llm.Model):
     can_stream = False  # We don't support streaming.
+
+    class Options(llm.Options):
+        bedrock_image_open: Optional[Union[str, bool]] = Field(
+            description="Whether to automatically open images after generating (true, false, 0, 1).",
+            default="true"
+        )
+        @field_validator("bedrock_image_open")
+        def validate_bedrock_image_open(cls, value):
+            if value is None:
+                return None
+            if str(value).lower() not in ['true', 'false', '0', '1']:
+                raise ValueError("bedrock_image_open must be one of true, false, 0, 1.")
+            return str(value).lower() in ['true', '1']
 
     def __init__(self, model_id):
         self.model_id = model_id
@@ -87,6 +104,23 @@ class BedrockImage(llm.Model):
 
         return result
 
+    @staticmethod
+    def open_file(path):
+        """
+        Open the given file path on the user’s OS with its default application.
+        See: https://stackoverflow.com/questions/434597/open-document-with-default-os-application-in-python-both-in-windows-and-mac-os
+
+        :param path: The path to a file to be opened.
+        :return: None
+        """
+        if platform.system() == 'Darwin':  # macOS
+            subprocess.call(('open', path))
+        elif platform.system() == 'Windows':  # Windows
+            # os.startfile(path) # Replaced by Amazon Q Developer with the below line to improve security.
+            subprocess.run([filepath], shell=False, check=True, capture_output=True, text=True)
+        else:  # linux variants
+            subprocess.call(('xdg-open', path))
+
     def execute(self, prompt, stream, response, conversation):
         """
         Take the prompt and run it through our model. Return a response in streaming
@@ -105,19 +139,27 @@ class BedrockImage(llm.Model):
         params = self.prompt_to_titan_params(prompt)
         bedrock = boto3.client("bedrock-runtime")
 
-        response = bedrock.invoke_model(
+        bedrock_response = bedrock.invoke_model(
             modelId=self.model_id,
             contentType="application/json",
             accept="application/json",
             body=json.dumps(params)
         )
 
-        response_body = json.loads(response.get("body").read())
+        response_body = json.loads(bedrock_response.get("body").read())
         image_data = response_body.get("images")[0]
         image_bytes = base64.b64decode(image_data)
         image_filename = self.prompt_to_filename(prompt)
 
+        # Remove image from response body and log the rest.
+        for i in range(len(response_body['images'])):
+            response_body['images'][i] = f'<image data {i + 1}>'
+        response.response_json = json.dumps(response_body)
+
         with open(image_filename, "wb") as fp:
             fp.write(image_bytes)
+
+        if prompt.options.bedrock_image_open:
+            self.open_file(image_filename)
 
         yield f"Result image written to: {image_filename}"
