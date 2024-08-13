@@ -1,6 +1,6 @@
-# llm-bedrock-image
+# llm-bedrock-titan-image
 
-[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/sblakey/llm-bedrock-anthropic/blob/main/LICENSE)
+[![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/zalez/llm-bedrock-titan-image/blob/main/LICENSE)
 
 Plugin for Simon Willison’s [LLM](https://llm.datasette.io) CLI utility, adding support for Amazon Titan Image Generator
 G1 models on Amazon Bedrock.
@@ -13,15 +13,15 @@ This installation assumes you have a working installation of Simon Willison’s 
 Install from GitHub:
 
 ```bash
-git clone https://github.com/zalez/llm-bedrock-image-titan.git
+git clone https://github.com/zalez/llm-bedrock-titan-image.git
 cd <directory you cloned into>
 llm install -e .
 ```
 
-At some point, this will by published onto PyPi, after which you should be able to just say:
+At some point, this will be published onto PyPi, after which you should be able to just say:
 
 ```bash
-llm install llm-bedrock-image
+llm install llm-bedrock-titan-image
 ```
 
 ## Configuration
