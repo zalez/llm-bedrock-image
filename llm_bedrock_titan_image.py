@@ -1,8 +1,8 @@
 """
-llm-bedrock-image
+llm-bedrock-titan-image
 
-A plugin for Simon Willison’s llm CLI utility: https://llm.datasette.io/
-This plugin adds support for image generation models on Amazon Bedrock.
+A plugin for Simon Willison’s LLM CLI utility: https://llm.datasette.io/
+This plugin adds support for Amazon Titan Image Generator G1 image generation models on Amazon Bedrock.
 
 See the llm Plugins documentation on how to add this plugin to your installation of llm:
 https://llm.datasette.io/en/stable/plugins/index.html
@@ -32,6 +32,8 @@ from pydantic import field_validator, Field
 # Constants
 
 DEBUG = os.environ.get('DEBUG', 'false').lower() in ['true', '1']
+
+# Model defaults
 
 MIN_NUMBER_OF_IMAGES = 1
 MAX_NUMBER_OF_IMAGES = 5
@@ -78,13 +80,13 @@ MIN_SEED = 0
 MAX_SEED = 2147483646
 DEFAULT_SEED = 0
 
+# Pricing information
+
 # Taken from looking at: https://aws.amazon.com/bedrock/pricing/
 # There are no guarantees that this will work in the future.
 AWS_BEDROCK_PRICING_URL = 'https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/bedrock/USD/current/bedrock.json'
 AWS_LOCATIONS_URL = 'https://b0.p.awsstatic.com/locations/1.0/aws/current/locations.json'
 
-# This could be discovered using the Bedrock API, but we hard-code this here to save latency and
-# because it is unlikely to change.
 MODEL_ID_TO_MODEL_NAME = {
     'amazon.titan-image-generator-v2:0': 'Titan Image Generator V2'
 }
@@ -93,6 +95,9 @@ MODEL_ID_TO_MODEL_NAME = {
 # Functions
 
 def print_debug(name, value):
+    """
+    Print a JSON dump of the given value under the given name, only if DEBUG is set.
+    """
     if DEBUG:
         print(f'{name}:')
         print(json.dumps(value, sort_keys=True, indent=2))
@@ -106,116 +111,120 @@ def register_models(register):
     :return: None
     """
     register(
-        BedrockImage("amazon.titan-image-generator-v2:0"),
-        aliases=("bedrock-image-titan-v2", "bedrock-image-titan", "bit"),
+        BedrockTitanImage("amazon.titan-image-generator-v2:0"),
+        aliases=("bedrock-image-titan-v2", "bedrock-image-titan", "bti"),
     )
     # TODO: Add Titan v1 as well.
-    # TODO: Add Stable Diffusion.
 
 
 # Classes
 
-class BedrockImage(llm.Model):
+class BedrockTitanImage(llm.Model):
+    """
+    This class handles Amazon Titan Image Generator models on Amazon Bedrock.
+    """
     can_stream = True  # Yield updates while saving images if streaming.
 
+    # Model and other options we support.
+    # We assume that these are scoped to our class only, so we can use simple names.
     class Options(llm.Options):
-        bedrock_image_open: Optional[Union[str, bool]] = Field(
+        auto_open: Optional[Union[str, bool]] = Field(
             description='Whether to automatically open images after generating (true, false, 0, 1).',
             default=True
         )
-        bedrock_image_negative_prompt: Optional[str] = Field(
+        negative_prompt: Optional[str] = Field(
             description='Additional prompt with things to avoid generating.',
             default=None
         )
-        bedrock_image_number_of_images: Optional[int] = Field(
+        number_of_images: Optional[int] = Field(
             description='The number of images to generate.',
             default=DEFAULT_NUMBER_OF_IMAGES
         )
-        bedrock_image_cfg_scale: Optional[Union[int, float]] = Field(
+        cfg_scale: Optional[Union[int, float]] = Field(
             description='Specifies how strongly the generated image should adhere to the prompt. Use a lower value ' +
                         'to introduce more randomness in the generation',
             default=DEFAULT_CFG_SCALE
         )
-        bedrock_image_height: Optional[int] = Field(
+        height: Optional[int] = Field(
             description='The height of the image in pixels.',
             default=DEFAULT_IMAGE_SIZE[1]
         )
-        bedrock_image_width: Optional[int] = Field(
+        width: Optional[int] = Field(
             description='The width of the image in pixels.',
             default=DEFAULT_IMAGE_SIZE[0]
         )
-        bedrock_image_seed: Optional[int] = Field(
+        seed: Optional[int] = Field(
             description='Use to control and reproduce results. Determines the initial noise setting. Use the same ' +
                         'seed and the same settings as a previous run to allow inference to create a similar image.',
             default=DEFAULT_SEED
         )
 
-        @field_validator('bedrock_image_open')
-        def validate_bedrock_image_open(cls, value):
+        @field_validator('auto_open')
+        def validate_auto_open(cls, value):
             if value is None:
                 return None
             if str(value).lower() not in ['true', 'false', '0', '1']:
-                raise ValueError('bedrock_image_open must be one of true, false, 0, 1.')
+                raise ValueError('auto_open must be one of true, false, 0, 1.')
             return str(value).lower() in ['true', '1']
 
-        @field_validator('bedrock_image_negative_prompt')
-        def validate_bedrock_image_negative_prompt(cls, value):
+        @field_validator('negative_prompt')
+        def validate_negative_prompt(cls, value):
             if value is None:
                 return None
             if not isinstance(value, str):
-                raise ValueError('bedrock_image_negative_prompt must be a string.')
+                raise ValueError('negative_prompt must be a string.')
             return value
 
-        @field_validator('bedrock_image_number_of_images')
-        def validate_bedrock_image_number_of_images(cls, value):
+        @field_validator('number_of_images')
+        def validate_number_of_images(cls, value):
             if value is None:
                 return None
             if not isinstance(value, int):
-                raise ValueError('bedrock_image_number_of_images must be an integer.')
+                raise ValueError('number_of_images must be an integer.')
             if value < MIN_NUMBER_OF_IMAGES or value > MAX_NUMBER_OF_IMAGES:
                 raise ValueError(
-                    f'bedrock_image_number_of_images must be between {MIN_NUMBER_OF_IMAGES} and {MAX_NUMBER_OF_IMAGES}.'
+                    f'number_of_images must be between {MIN_NUMBER_OF_IMAGES} and {MAX_NUMBER_OF_IMAGES}.'
                 )
             return value
 
-        @field_validator('bedrock_image_cfg_scale')
-        def validate_bedrock_image_cfg_scale(cls, value):
+        @field_validator('cfg_scale')
+        def validate_cfg_scale(cls, value):
             if value is None:
                 return None
             if not isinstance(value, (int, float)):
-                raise ValueError('bedrock_image_cfg_scale must be an integer or float.')
+                raise ValueError('cfg_scale must be an integer or float.')
             if value < MIN_CFG_SCALE or value > MAX_CFG_SCALE:
-                raise ValueError(f'bedrock_image_cfg_scale must be between {MIN_CFG_SCALE} and {MAX_CFG_SCALE}.')
+                raise ValueError(f'cfg_scale must be between {MIN_CFG_SCALE} and {MAX_CFG_SCALE}.')
             return value
 
-        @field_validator('bedrock_image_height')
-        def validate_bedrock_image_height(cls, value):
+        @field_validator('height')
+        def validate_height(cls, value):
             if value is None:
                 return None
             if not isinstance(value, int):
-                raise ValueError('bedrock_image_height must be an integer.')
+                raise ValueError('height must be an integer.')
             if value not in IMAGE_HEIGHTS:
-                raise ValueError(f'bedrock_image_height must be one of: {', '.join(IMAGE_HEIGHTS)}.')
+                raise ValueError(f'height must be one of: {', '.join(IMAGE_HEIGHTS)}.')
             return value
 
-        @field_validator('bedrock_image_width')
-        def validate_bedrock_image_width(cls, value):
+        @field_validator('width')
+        def validate_width(cls, value):
             if value is None:
                 return None
             if not isinstance(value, int):
-                raise ValueError('bedrock_image_width must be an integer.')
+                raise ValueError('width must be an integer.')
             if value not in IMAGE_WIDTHS:
-                raise ValueError(f'bedrock_image_width must be one of: {', '.join(IMAGE_WIDTHS)}.')
+                raise ValueError(f'width must be one of: {', '.join(IMAGE_WIDTHS)}.')
             return value
 
-        @field_validator('bedrock_image_seed')
-        def validate_bedrock_image_seed(cls, value):
+        @field_validator('seed')
+        def validate_seed(cls, value):
             if value is None:
                 return None
             if not isinstance(value, int):
-                raise ValueError('bedrock_image_seed must be an integer.')
+                raise ValueError('seed must be an integer.')
             if value < MIN_SEED or value > MAX_SEED:
-                raise ValueError(f'bedrock_image_seed must be between {MIN_SEED} and {MAX_SEED}.')
+                raise ValueError(f'seed must be between {MIN_SEED} and {MAX_SEED}.')
             return value
 
     def __init__(self, model_id):
@@ -366,7 +375,7 @@ class BedrockImage(llm.Model):
             )
 
         # Validate the combination of width and height.
-        size = (prompt.options.bedrock_image_width, prompt.options.bedrock_image_height)
+        size = (prompt.options.width, prompt.options.height)
         if size not in IMAGE_SIZES:
             raise ValueError(
                 f"Invalid image size {size}. Valid sizes are: {', '.join([str(i) for i in IMAGE_SIZES])}."
@@ -380,9 +389,9 @@ class BedrockImage(llm.Model):
             'imageGenerationConfig': {
                 'width': size[0],
                 'height': size[1],
-                'numberOfImages': prompt.options.bedrock_image_number_of_images,
-                'cfgScale': prompt.options.bedrock_image_cfg_scale,
-                'seed': prompt.options.bedrock_image_seed
+                'numberOfImages': prompt.options.number_of_images,
+                'cfgScale': prompt.options.cfg_scale,
+                'seed': prompt.options.seed
             }
         }
 
@@ -516,7 +525,7 @@ class BedrockImage(llm.Model):
             with open(image_filename, "wb") as fp:
                 fp.write(image_bytes)
 
-            if prompt.options.bedrock_image_open:
+            if prompt.options.auto_open:
                 self.open_file(image_filename)
 
             response_body['images'][i] = f'<image data {i + 1}>'

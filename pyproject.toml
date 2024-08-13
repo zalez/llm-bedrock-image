@@ -1,8 +1,8 @@
 [project]
-name = "llm-bedrock-image"
+name = "llm-bedrock-titan-image"
 version = "0.1.1"
 
-description = "An llm plugin for supporting image generators on Amazon Bedrock."
+description = "An LLM plugin for supporting Amazon Titan image generators on Amazon Bedrock."
 readme = "README.md"
 authors = [{name = "Constantin Gonzalez"}]
 license = {text = "Apache-2.0"}
@@ -16,7 +16,7 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/zalez/llm-bedrock-image"
+Homepage = "https://github.com/zalez/llm-bedrock-titan-image"
 
 [project.entry-points.llm]
-bedrock_image = "llm_bedrock_image"
+bedrock_image_titan = "llm_bedrock_titan_image"
