@@ -14,13 +14,16 @@ https://docs.aws.amazon.com/bedrock/latest/userguide/what-is-bedrock.html
 
 # Imports
 
+from functools import cached_property
 import json
 import base64
 import subprocess
 import os
 import platform
 from typing import Optional, Union
+import concurrent.futures
 
+import requests
 import llm
 import boto3
 from pydantic import field_validator, Field
@@ -28,11 +31,72 @@ from pydantic import field_validator, Field
 
 # Constants
 
-MAX_SEED = 2147483646
+DEBUG = os.environ.get('DEBUG', 'false').lower() in ['true', '1']
+
+MIN_NUMBER_OF_IMAGES = 1
 MAX_NUMBER_OF_IMAGES = 5
+DEFAULT_NUMBER_OF_IMAGES = 1
+
+MIN_CFG_SCALE = 1.1
+MAX_CFG_SCALE = 10.0
+DEFAULT_CFG_SCALE = 8.0
+
+# (width, height),
+# see: https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-titan-image.html
+IMAGE_SIZES = [
+    (1024, 1024),
+    (768, 768),
+    (512, 512),
+    (768, 1152),
+    (384, 576),
+    (1152, 768),
+    (576, 384),
+    (768, 1280),
+    (384, 640),
+    (1280, 768),
+    (640, 384),
+    (896, 1152),
+    (448, 576),
+    (1152, 896),
+    (576, 448),
+    (768, 1408),
+    (384, 704),
+    (1408, 768),
+    (704, 384),
+    (640, 1408),
+    (320, 704),
+    (1408, 640),
+    (704, 320),
+    (1152, 640),
+    (1173, 640)
+]
+IMAGE_HEIGHTS = list(set([i[1] for i in IMAGE_SIZES]))
+IMAGE_WIDTHS = list(set([i[0] for i in IMAGE_SIZES]))
+DEFAULT_IMAGE_SIZE = (1024, 1024)
+
+MIN_SEED = 0
+MAX_SEED = 2147483646
+DEFAULT_SEED = 0
+
+# Taken from looking at: https://aws.amazon.com/bedrock/pricing/
+# There are no guarantees that this will work in the future.
+AWS_BEDROCK_PRICING_URL = 'https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/bedrock/USD/current/bedrock.json'
+AWS_LOCATIONS_URL = 'https://b0.p.awsstatic.com/locations/1.0/aws/current/locations.json'
+
+# This could be discovered using the Bedrock API, but we hard-code this here to save latency and
+# because it is unlikely to change.
+MODEL_ID_TO_MODEL_NAME = {
+    'amazon.titan-image-generator-v2:0': 'Titan Image Generator V2'
+}
 
 
 # Functions
+
+def print_debug(name, value):
+    if DEBUG:
+        print(f'{name}:')
+        print(json.dumps(value, sort_keys=True, indent=2))
+
 
 @llm.hookimpl
 def register_models(register):
@@ -46,7 +110,7 @@ def register_models(register):
         aliases=("bedrock-image-titan-v2", "bedrock-image-titan", "bit"),
     )
     # TODO: Add Titan v1 as well.
-    # TODO: Add Stable diffusion.
+    # TODO: Add Stable Diffusion.
 
 
 # Classes
@@ -63,14 +127,27 @@ class BedrockImage(llm.Model):
             description='Additional prompt with things to avoid generating.',
             default=None
         )
+        bedrock_image_number_of_images: Optional[int] = Field(
+            description='The number of images to generate.',
+            default=DEFAULT_NUMBER_OF_IMAGES
+        )
+        bedrock_image_cfg_scale: Optional[Union[int, float]] = Field(
+            description='Specifies how strongly the generated image should adhere to the prompt. Use a lower value ' +
+                        'to introduce more randomness in the generation',
+            default=DEFAULT_CFG_SCALE
+        )
+        bedrock_image_height: Optional[int] = Field(
+            description='The height of the image in pixels.',
+            default=DEFAULT_IMAGE_SIZE[1]
+        )
+        bedrock_image_width: Optional[int] = Field(
+            description='The width of the image in pixels.',
+            default=DEFAULT_IMAGE_SIZE[0]
+        )
         bedrock_image_seed: Optional[int] = Field(
             description='Use to control and reproduce results. Determines the initial noise setting. Use the same ' +
                         'seed and the same settings as a previous run to allow inference to create a similar image.',
-            default=None
-        )
-        bedrock_image_number_of_images: Optional[int] = Field(
-            description='Number of images to generate.',
-            default=None
+            default=DEFAULT_SEED
         )
 
         @field_validator('bedrock_image_open')
@@ -80,6 +157,7 @@ class BedrockImage(llm.Model):
             if str(value).lower() not in ['true', 'false', '0', '1']:
                 raise ValueError('bedrock_image_open must be one of true, false, 0, 1.')
             return str(value).lower() in ['true', '1']
+
         @field_validator('bedrock_image_negative_prompt')
         def validate_bedrock_image_negative_prompt(cls, value):
             if value is None:
@@ -87,27 +165,192 @@ class BedrockImage(llm.Model):
             if not isinstance(value, str):
                 raise ValueError('bedrock_image_negative_prompt must be a string.')
             return value
-        @field_validator('bedrock_image_seed')
-        def validate_bedrock_image_seed(cls, value):
-            if value is None:
-                return None
-            if not isinstance(value, int):
-                raise ValueError('bedrock_image_seed must be an integer.')
-            if value < 0 or value > MAX_SEED:
-                raise ValueError(f'bedrock_image_seed must be between 0 and {MAX_SEED}.')
-            return value
+
         @field_validator('bedrock_image_number_of_images')
         def validate_bedrock_image_number_of_images(cls, value):
             if value is None:
                 return None
             if not isinstance(value, int):
                 raise ValueError('bedrock_image_number_of_images must be an integer.')
-            if value < 1 or value > MAX_NUMBER_OF_IMAGES:
-                raise ValueError(f'bedrock_image_number_of_images must be between 1 and {MAX_NUMBER_OF_IMAGES}.')
+            if value < MIN_NUMBER_OF_IMAGES or value > MAX_NUMBER_OF_IMAGES:
+                raise ValueError(
+                    f'bedrock_image_number_of_images must be between {MIN_NUMBER_OF_IMAGES} and {MAX_NUMBER_OF_IMAGES}.'
+                )
+            return value
+
+        @field_validator('bedrock_image_cfg_scale')
+        def validate_bedrock_image_cfg_scale(cls, value):
+            if value is None:
+                return None
+            if not isinstance(value, (int, float)):
+                raise ValueError('bedrock_image_cfg_scale must be an integer or float.')
+            if value < MIN_CFG_SCALE or value > MAX_CFG_SCALE:
+                raise ValueError(f'bedrock_image_cfg_scale must be between {MIN_CFG_SCALE} and {MAX_CFG_SCALE}.')
+            return value
+
+        @field_validator('bedrock_image_height')
+        def validate_bedrock_image_height(cls, value):
+            if value is None:
+                return None
+            if not isinstance(value, int):
+                raise ValueError('bedrock_image_height must be an integer.')
+            if value not in IMAGE_HEIGHTS:
+                raise ValueError(f'bedrock_image_height must be one of: {', '.join(IMAGE_HEIGHTS)}.')
+            return value
+
+        @field_validator('bedrock_image_width')
+        def validate_bedrock_image_width(cls, value):
+            if value is None:
+                return None
+            if not isinstance(value, int):
+                raise ValueError('bedrock_image_width must be an integer.')
+            if value not in IMAGE_WIDTHS:
+                raise ValueError(f'bedrock_image_width must be one of: {', '.join(IMAGE_WIDTHS)}.')
+            return value
+
+        @field_validator('bedrock_image_seed')
+        def validate_bedrock_image_seed(cls, value):
+            if value is None:
+                return None
+            if not isinstance(value, int):
+                raise ValueError('bedrock_image_seed must be an integer.')
+            if value < MIN_SEED or value > MAX_SEED:
+                raise ValueError(f'bedrock_image_seed must be between {MIN_SEED} and {MAX_SEED}.')
             return value
 
     def __init__(self, model_id):
         self.model_id = model_id
+        self.model_name = MODEL_ID_TO_MODEL_NAME[model_id]
+        self.denied_regions = []  # Regions we tried, but didn't work.
+        self.successful_region = None  # The region we successfully used.
+
+    def is_supported_in_region(self, region):
+        """
+        Discover if the given region supports the given model.
+
+        :param region: An AWS Region name
+        :return: True or False
+        """
+        bedrock = boto3.client('bedrock', region_name=region)
+        response = bedrock.list_foundation_models(byOutputModality='IMAGE')
+        models = [m['modelId'] for m in response['modelSummaries']]
+        return self.model_id in models
+
+    @cached_property
+    def supported_regions(self):
+        """
+        Return a list of regions where this model is supported.
+        We use a pool of concurrent threads to parallelize for speed.
+        :return: A list of region names that support our model.
+        """
+        bedrock_regions = boto3.Session().get_available_regions('bedrock')
+
+        model_regions = []
+        with concurrent.futures.ThreadPoolExecutor(max_workers=len(bedrock_regions)) as executor:
+            # Start the discovery operations and mark each future with its region
+            future_to_region = {
+                executor.submit(self.is_supported_in_region, region): region
+                for region in bedrock_regions
+            }
+            for future in concurrent.futures.as_completed(future_to_region):
+                region = future_to_region[future]
+                if future.result():
+                    model_regions.append(region)
+
+        print_debug('Supported regions', model_regions)
+        return model_regions
+
+    @cached_property
+    def region_to_location(self):
+        """
+        Return a region-to-location-names dict downloaded from the AWS pricing website.
+        Return None if this information is not available.
+
+        :return: a dict with AWS region codes as keys and AWS pricing region names as values.
+        """
+        r = requests.get(AWS_LOCATIONS_URL)
+        if r.status_code != 200:
+            return None
+
+        result = {
+            v['code']: v['name']
+            for v in r.json().values()
+            if v['type'] == 'AWS Region'
+        }
+
+        return result
+
+    @cached_property
+    def pricing(self):
+        """
+        Return a region-to-model-pricing dict downloaded from the AWS pricing website.
+        Sort the list by price.
+        Return None if this information is not available.
+
+        :return: a dict with AWS region codes as keys and model pricing info dicts as values.
+        """
+        r = requests.get(AWS_BEDROCK_PRICING_URL)
+        if r.status_code != 200:
+            return None
+
+        pricing = r.json()['regions']
+        print_debug('Raw pricing', pricing)
+
+        result = {}
+        for region in self.supported_regions:
+            pricing_region = self.region_to_location.get(region)
+            if pricing_region not in pricing:  # Unlikely, but could happen. Discard if.
+                self.denied_regions.append(region)
+                continue
+
+            for k, v in pricing[pricing_region].items():
+                if not (
+                    k.startswith('Amazon Bedrock On-demand Inference T2I') and
+                    self.model_name in k
+                ):
+                    continue
+
+                size, variant, name = k.split(' ', maxsplit=7)[5:]
+                if result.get(region) is None:
+                    result[region] = {}
+                if result[region].get(size) is None:
+                    result[region][size] = {}
+                result[region][size][variant] = v['price']
+
+        print_debug('Pricing data', result)
+        return result
+
+    @cached_property
+    def regions_by_price(self):
+        """
+        Return a list of regions that support our model, sorted by price for this model.
+        Prices come in output sizes and quality variants. We assume that price
+        differences are consistent between sizes any variants within regions, so we can
+        pick any size and variant and sort the regions by that price.
+        If no pricing data is available, return the list of regions in any order.
+
+        :return: A list of region names.
+        """
+        if not self.pricing:
+            return self.supported_regions
+
+        # Pick any size and variant, then sort the regions by it.
+        regions = list(self.pricing.keys())
+        print_debug('Pricing regions', regions)
+
+        size = list(self.pricing[regions[0]].keys())[0]  # First size.
+        print_debug('Size', size)
+
+        variant = list(self.pricing[regions[0]][size].keys())[0]  # First variant.
+        print_debug('Variant', variant)
+
+        return sorted(
+            regions,
+            key=lambda x: (
+                self.pricing[x][size][variant],
+                x  # if pricing is the same, sort alphabetically by region name.
+            )
+        )
 
     @staticmethod
     def prompt_to_titan_params(prompt):
@@ -122,19 +365,26 @@ class BedrockImage(llm.Model):
                 "Generator G1 models is 512 characters."
             )
 
-        params= {
+        # Validate the combination of width and height.
+        size = (prompt.options.bedrock_image_width, prompt.options.bedrock_image_height)
+        if size not in IMAGE_SIZES:
+            raise ValueError(
+                f"Invalid image size {size}. Valid sizes are: {', '.join([str(i) for i in IMAGE_SIZES])}."
+            )
+
+        params = {
             'taskType': 'TEXT_IMAGE',
             'textToImageParams': {
                 'text': prompt.prompt
             },
-            'imageGenerationConfig': {}
+            'imageGenerationConfig': {
+                'width': size[0],
+                'height': size[1],
+                'numberOfImages': prompt.options.bedrock_image_number_of_images,
+                'cfgScale': prompt.options.bedrock_image_cfg_scale,
+                'seed': prompt.options.bedrock_image_seed
+            }
         }
-        if prompt.options.bedrock_image_negative_prompt:
-            params["textToImageParams"]["negativeText"] = prompt.options.bedrock_image_negative_prompt
-        if prompt.options.bedrock_image_seed:
-            params['imageGenerationConfig']['seed'] = prompt.options.bedrock_image_seed
-        if prompt.options.bedrock_image_number_of_images:
-            params['imageGenerationConfig']['numberOfImages'] = prompt.options.bedrock_image_number_of_images
 
         return params
 
@@ -172,7 +422,8 @@ class BedrockImage(llm.Model):
     def open_file(path):
         """
         Open the given file path on the user’s OS with its default application.
-        See: https://stackoverflow.com/questions/434597/open-document-with-default-os-application-in-python-both-in-windows-and-mac-os
+        See: https://stackoverflow.com/questions/434597/open-document-with-default-os-application-in-python-both-
+             in-windows-and-mac-os
 
         :param path: The path to a file to be opened.
         :return: None
@@ -181,9 +432,35 @@ class BedrockImage(llm.Model):
             subprocess.call(('open', path))
         elif platform.system() == 'Windows':  # Windows
             # os.startfile(path) # Replaced by Amazon Q Developer with the below line to improve security.
-            subprocess.run([filepath], shell=False, check=True, capture_output=True, text=True)
+            subprocess.run([path], shell=False, check=True, capture_output=True, text=True)
         else:  # linux variants
             subprocess.call(('xdg-open', path))
+
+    @property
+    def region(self):
+        """
+        Return the next best supported region for this model.
+        If we know a region was successfully used, return that.
+        If not, find the next best region choice based on the AWS_DEFAULT_REGION environment
+        variable and a price-sorted list of regions.
+        Also, return a reason for why it was chosen.
+        Return None if no more regions are available for trying out.
+
+        :return: A region name, reason string tuple.
+        """
+        if self.successful_region:
+            return self.successful_region, 'from previous successful region'
+
+        # Try the AWS_DEFAULT_REGION environment variable.
+        region = os.environ.get('AWS_DEFAULT_REGION')
+        if region and self.is_supported_in_region(region) and region not in self.denied_regions:
+            return region, 'from AWS_DEFAULT_REGION environment variable'
+
+        for region in self.regions_by_price:
+            if region not in self.denied_regions:
+                return region, 'lowest cost supported'
+
+        return None, 'no more regions left to try'
 
     def execute(self, prompt, stream, response, conversation):
         """
@@ -200,17 +477,32 @@ class BedrockImage(llm.Model):
         :return: None. Use yield to return results.
         """
         params = self.prompt_to_titan_params(prompt)
-        bedrock = boto3.client("bedrock-runtime")
 
-        if stream:
-            yield "Generating image...\n"
+        # There's no way to discover whether we have a subscription for a model in a specific
+        # region, other than trying.
+        bedrock_response = None
 
-        bedrock_response = bedrock.invoke_model(
-            modelId=self.model_id,
-            contentType="application/json",
-            accept="application/json",
-            body=json.dumps(params)
-        )
+        region, region_reason = self.region
+        while region and not bedrock_response:
+            if stream:
+                yield f'Calling {self.model_name} on Bedrock in the {region} region ({region_reason}).\n'
+
+            bedrock = boto3.client('bedrock-runtime', region_name=region)
+            try:
+                bedrock_response = bedrock.invoke_model(
+                    modelId=self.model_id,
+                    contentType="application/json",
+                    accept="application/json",
+                    body=json.dumps(params)
+                )
+                self.successful_region = region
+                break
+            except bedrock.exceptions.AccessDeniedException:
+                if stream:
+                    yield f'Access denied. Please consider requesting access to this model in the {region} region.\n'
+
+                self.denied_regions.append(region)
+                region, region_reason = self.region
 
         response_body = json.loads(bedrock_response.get("body").read())
 
@@ -237,6 +529,13 @@ class BedrockImage(llm.Model):
         response.response_json = json.dumps(response_body)
         if not stream:
             if len(file_names) == 1:
-                yield 'Image written to: ' + file_names[0] + '\n'
+                yield (
+                    f'Image generated in the {region} Region ({region_reason}) ' +
+                    f'and written to: {file_names[0]}.\n'
+                )
             else:
-                yield 'Images written to:\n' + '\n    '.join(file_names) + '\n'
+                yield (
+                    f'Images generated in the {region} region ({region_reason}.\n' +
+                    'Images written to:\n' +
+                    f'{"\n    ".join(file_names)}\n'
+                )
