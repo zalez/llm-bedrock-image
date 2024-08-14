@@ -88,7 +88,8 @@ AWS_BEDROCK_PRICING_URL = 'https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMap
 AWS_LOCATIONS_URL = 'https://b0.p.awsstatic.com/locations/1.0/aws/current/locations.json'
 
 MODEL_ID_TO_MODEL_NAME = {
-    'amazon.titan-image-generator-v2:0': 'Titan Image Generator V2'
+    'amazon.titan-image-generator-v1': 'Titan Image Generator G1',
+    'amazon.titan-image-generator-v2:0': 'Titan Image Generator V2',  # G1 V2 is correct, but the price list needs this.
 }
 
 
@@ -111,10 +112,13 @@ def register_models(register):
     :return: None
     """
     register(
-        BedrockTitanImage("amazon.titan-image-generator-v2:0"),
-        aliases=("bedrock-image-titan-v2", "bedrock-image-titan", "bti"),
+        BedrockTitanImage('amazon.titan-image-generator-v1'),
+        aliases=('bedrock-image-titan-v1', 'bti1'),
     )
-    # TODO: Add Titan v1 as well.
+    register(
+        BedrockTitanImage('amazon.titan-image-generator-v2:0'),
+        aliases=('bedrock-image-titan-v2', 'bedrock-image-titan', 'bti'),
+    )
 
 
 # Classes
