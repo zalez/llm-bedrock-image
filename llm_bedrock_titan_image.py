@@ -113,11 +113,11 @@ def register_models(register):
     """
     register(
         BedrockTitanImage('amazon.titan-image-generator-v1'),
-        aliases=('bedrock-image-titan-v1', 'bti1'),
+        aliases=('amazon-titan-image-v1', 'ati1'),
     )
     register(
         BedrockTitanImage('amazon.titan-image-generator-v2:0'),
-        aliases=('bedrock-image-titan-v2', 'bedrock-image-titan', 'bti'),
+        aliases=('amazon-titan-image-v2', 'amazon-titan-image', 'ati2', 'ati'),
     )
 
 
@@ -132,8 +132,19 @@ class BedrockTitanImage(llm.Model):
     # Model and other options we support.
     # We assume that these are scoped to our class only, so we can use simple names.
     class Options(llm.Options):
+        region: Optional[Union[str, bool]] = Field(
+            description='The AWS region to use for this model. Overrides the AWS_DEFAULT_REGION environment, ' +
+                        'if set. If none is configured and auto_region is true, this plugin will automatically ' +
+                        'choose a supported and enabled region. If this is set, the auto_region option is ignored.',
+            default=None
+        )
+        auto_region: Optional[Union[str, bool]] = Field(
+            description='Choose a supported AWS Region automatically if none is configured or the model isn’t ' +
+                        'available/accessible there (true, false, on, off, 0, 1).',
+            default=True
+        )
         auto_open: Optional[Union[str, bool]] = Field(
-            description='Whether to automatically open images after generating (true, false, 0, 1).',
+            description='Open images after automatically after generating (true, false, on, off, 0, 1).',
             default=True
         )
         negative_prompt: Optional[str] = Field(
@@ -163,13 +174,30 @@ class BedrockTitanImage(llm.Model):
             default=DEFAULT_SEED
         )
 
+        @field_validator('region')
+        def validate_region(cls, value):
+            if value is None:
+                return None
+            bedrock_regions = boto3.Session().get_available_regions('bedrock')
+            if str(value).lower() not in bedrock_regions:
+                raise ValueError(f'region must be one of the supported Amazon Bedrock regions: {bedrock_regions}.')
+            return str(value).lower()
+
+        @field_validator('auto_region')
+        def validate_auto_region(cls, value):
+            if value is None:
+                return None
+            if str(value).lower() not in ['true', 'false', 'on', 'off', '0', '1']:
+                raise ValueError('auto_region must be one of true, false, on, off, 0, 1.')
+            return str(value).lower() in ['true', 'on', '1']
+
         @field_validator('auto_open')
         def validate_auto_open(cls, value):
             if value is None:
                 return None
-            if str(value).lower() not in ['true', 'false', '0', '1']:
-                raise ValueError('auto_open must be one of true, false, 0, 1.')
-            return str(value).lower() in ['true', '1']
+            if str(value).lower() not in ['true', 'false', 'on', 'off', '0', '1']:
+                raise ValueError('auto_open must be one of true, false, on, off, 0, 1.')
+            return str(value).lower() in ['true', 'on', '1']
 
         @field_validator('negative_prompt')
         def validate_negative_prompt(cls, value):
@@ -236,6 +264,7 @@ class BedrockTitanImage(llm.Model):
         self.model_name = MODEL_ID_TO_MODEL_NAME[model_id]
         self.denied_regions = []  # Regions we tried, but didn't work.
         self.successful_region = None  # The region we successfully used.
+        self.options = None  # Make options available throughout the class.
 
     def is_supported_in_region(self, region):
         """
@@ -464,16 +493,25 @@ class BedrockTitanImage(llm.Model):
         if self.successful_region:
             return self.successful_region, 'from previous successful region'
 
-        # Try the AWS_DEFAULT_REGION environment variable.
+        # Did the user set the region option?
+        if self.options and self.options.region:
+            region = self.options.region
+            if self.is_supported_in_region(region) and region not in self.denied_regions:
+                return region, 'from -o region option'
+            raise ValueError(f'{self.options.region} not supported or not accessible.')
+
+        # Is the AWS_DEFAULT_REGION environment variable set?
         region = os.environ.get('AWS_DEFAULT_REGION')
         if region and self.is_supported_in_region(region) and region not in self.denied_regions:
             return region, 'from AWS_DEFAULT_REGION environment variable'
 
-        for region in self.regions_by_price:
-            if region not in self.denied_regions:
-                return region, 'lowest cost supported'
+        # If AWS_DEFAULT_REGION didn't work and auto_region is true, choose the lowest cost one.
+        if self.options and self.options.auto_region:
+            for region in self.regions_by_price:
+                if region not in self.denied_regions:
+                    return region, 'lowest cost region supporting this model'
 
-        return None, 'no more regions left to try'
+        raise Exception('AWS_DEFAULT_REGION not supported or accessible, no more regions left to try.')
 
     def execute(self, prompt, stream, response, conversation):
         """
@@ -489,6 +527,7 @@ class BedrockTitanImage(llm.Model):
         :param conversation: A llm conversation object with the conversation history (if any) (unused).
         :return: None. Use yield to return results.
         """
+        self.options = prompt.options
         params = self.prompt_to_titan_params(prompt)
 
         # There's no way to discover whether we have a subscription for a model in a specific
