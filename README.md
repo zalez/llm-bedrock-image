@@ -1,5 +1,6 @@
 # llm-bedrock-titan-image
 
+[![PyPI](https://img.shields.io/pypi/v/llm-bedrock-titan-image.svg)](https://pypi.org/project/llm-bedrock-titan-image/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/zalez/llm-bedrock-titan-image/blob/main/LICENSE)
 
 Plugin for Simon Willison’s [LLM](https://llm.datasette.io) CLI utility, adding support for Amazon Titan Image Generator
