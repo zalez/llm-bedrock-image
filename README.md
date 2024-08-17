@@ -260,3 +260,16 @@ Example:
 ```bash
 llm -m ati "A dolphin." -o seed 42
 ```
+
+### -o quality [standard|premium]
+
+The quality to generate image with. Use "standard" for drafting and "premium" to get finder details.
+
+Valid values: ```standard```, ```premium```
+
+Default: ```standard```
+
+Example:
+```bash
+llm -m ati "A parrot." -o quality premium
+```

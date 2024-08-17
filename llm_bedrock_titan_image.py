@@ -173,6 +173,10 @@ class BedrockTitanImage(llm.Model):
                         'seed and the same settings as a previous run to allow inference to create a similar image.',
             default=DEFAULT_SEED
         )
+        quality: Optional[str] = Field(
+            description='The quality setting to use. Can be ’standard’ or ’premium’.',
+            default='standard'
+        )
 
         @field_validator('region')
         def validate_region(cls, value):
@@ -258,6 +262,14 @@ class BedrockTitanImage(llm.Model):
             if value < MIN_SEED or value > MAX_SEED:
                 raise ValueError(f'seed must be between {MIN_SEED} and {MAX_SEED}.')
             return value
+
+        @field_validator('quality')
+        def validate_quality(cls, value):
+            if value is None:
+                return None
+            if str(value).lower() not in ['standard', 'premium']:
+                raise ValueError('quality must be one of [standard|premium].')
+            return str(value).lower()
 
     def __init__(self, model_id):
         self.model_id = model_id
@@ -378,13 +390,8 @@ class BedrockTitanImage(llm.Model):
 
         # Pick any size and variant, then sort the regions by it.
         regions = list(self.pricing.keys())
-        print_debug('Pricing regions', regions)
-
         size = list(self.pricing[regions[0]].keys())[0]  # First size.
-        print_debug('Size', size)
-
         variant = list(self.pricing[regions[0]][size].keys())[0]  # First variant.
-        print_debug('Variant', variant)
 
         return sorted(
             regions,
@@ -424,9 +431,12 @@ class BedrockTitanImage(llm.Model):
                 'height': size[1],
                 'numberOfImages': prompt.options.number_of_images,
                 'cfgScale': prompt.options.cfg_scale,
-                'seed': prompt.options.seed
+                'seed': prompt.options.seed,
+                'quality': prompt.options.quality
             }
         }
+        if prompt.options.negative_prompt:
+            params['textToImageParams']['negativeText'] = prompt.options.negative_prompt
 
         return params
 
@@ -511,7 +521,7 @@ class BedrockTitanImage(llm.Model):
                 if region not in self.denied_regions:
                     return region, 'lowest cost region supporting this model'
 
-        raise Exception('AWS_DEFAULT_REGION not supported or accessible, no more regions left to try.')
+        raise ValueError('AWS_DEFAULT_REGION not supported or accessible, no more regions left to try.')
 
     def execute(self, prompt, stream, response, conversation):
         """
@@ -540,6 +550,7 @@ class BedrockTitanImage(llm.Model):
                 yield f'Calling {self.model_name} on Bedrock in the {region} region ({region_reason}).\n'
 
             bedrock = boto3.client('bedrock-runtime', region_name=region)
+            print_debug('Prompt body', params)
             try:
                 bedrock_response = bedrock.invoke_model(
                     modelId=self.model_id,
