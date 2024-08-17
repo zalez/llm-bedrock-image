@@ -17,14 +17,13 @@ That said, feedback, feature suggestions, and pull requests are welcome.
 Amazon Titan Image Generator G1 is a generative image model that allows users to generate realistic, studio-quality
 images using text prompts.
 
-You can learn more about this model from the [product page](https://aws.amazon.com/bedrock/titan/#Amazon_Titan_Image_Generator),
-its [documentation page](https://docs.aws.amazon.com/bedrock/latest/userguide/titan-image-models.html), its
+Learn more about this model from the [product page](https://aws.amazon.com/bedrock/titan/#Amazon_Titan_Image_Generator), its [documentation page](https://docs.aws.amazon.com/bedrock/latest/userguide/titan-image-models.html), its
 [parameter documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-titan-image.html), and
 its [prompt engineering best practices documentation](https://d2eo22ngex1n9g.cloudfront.net/Documentation/User+Guides/Titan/Amazon+Titan+Image+Generator+Prompt+Engineering+Guidelines.pdf).
 
 ## Cost
 
-Using these models come at some cost, billed to your AWS account. Please refer to the
+Using these models comes at some cost, billed to your AWS account. Please refer to the
 [Amazon Bedrock pricing page for Titan multi-modal models](https://aws.amazon.com/bedrock/pricing/#Amazon) for details.
 
 ## Security
@@ -37,11 +36,11 @@ to learn more about security topics related to the underlying SDK and Amazon Bed
 This plugin assumes that no security relevant or personally identified information is used in prompts in any way and
 that you are ok with prompt text to be transferred globally in an encrypted way to any AWS Region endpoint world-wide
 for execution. By setting the ```AWS_DEFAULT_REGION``` environment variable, and setting the ```auto_region``` option to
-```off```, you can ensure that the plugin only uses that region to execute your prompt.
+```off```, you can ensure that the plugin only uses your chosen region to execute your prompt.
 
 ## Installation
 
-This installation assumes you have a working installation of Simon Willison’s LLM tool. If not, see:
+This plugin assumes you have a working installation of Simon Willison’s LLM tool. If not, see:
 [LLM Setup](https://llm.datasette.io/en/stable/setup.html)
 
 Install from GitHub:
@@ -66,13 +65,13 @@ It is based on Boto3, the AWS SDK for Python. Check the
 on how to set up your AWS environment.
 
 Also, you need to have successfully requested access to one of the Amazon Titan Image Generator G1 models on Amazon
-Bedrock. See
+Bedrock using the AWS Console. See
 [Manage access to Amazon Bedrock foundation models](https://docs.aws.amazon.com/bedrock/latest/userguide/model-access.html)
 from the Amazon Bedrock Documentation on how to do this.
 
 ## Quickstart
 
-The easiest way to use this is:
+An easy way to use this plugin is:
 
 ```bash
 llm -m ati "A parrot."
@@ -83,14 +82,13 @@ current file system path:
 
 ![A parrot.](A_parrot.png)
 
-If a file with the same name exists already, this plugin will choose an unused version of the filename, like
-```A_parrot_1.png```.
+If a file with the same name exists already (likely, since this repository has one), this plugin will choose an unused
+version of the filename, like ```A_parrot_1.png```.
 
-The model identifier "ati" is shorthand for "amazon.titan-image-generator-v2:0", the model we’re using here.
-"A parrot." is the prompt we use to generate the image. Note that while LLM assumes we’re having a conversation with an
-LLM here, we’re merely generating images. However, we do handle useful output, like the resulting filename, as if we
-had received a conversation response from a "chat" LLM. This conversation is logged by LLM like any other LLM
-conversation.
+The model identifier "ati" is shorthand for "amazon.titan-image-generator-v2:0", the model we specified here.
+"A parrot." is the prompt used to generate the image. Note that while LLM assumes a conversation with an LLM, we’re
+merely generating images here. However, we do handle useful output, like the resulting filename, as if we
+had received a conversation response from a "chat" LLM. This is logged by LLM like any other LLM conversation.
 
 When crafting prompts, check out the
 [Amazon Titan Image Generator Prompt Engineering Best Practices documentation](https://d2eo22ngex1n9g.cloudfront.net/Documentation/User+Guides/Titan/Amazon+Titan+Image+Generator+Prompt+Engineering+Guidelines.pdf)
@@ -126,6 +124,7 @@ The AWS region to use for this model. Overrides the AWS_DEFAULT_REGION environme
 auto_region (see below) is true, this plugin will automatically choose a supported and enabled region.
 
 If this option is set, the auto_region option is ignored.
+
 Valid values: Any AWS Region where the Amazon Bedrock service is available. As of 2024-08-16, these are: 
 ```ap-northeast-1```, ```ap-south-1```, ```ap-southeast-1```, ```ap-southeast-2```, ```ca-central-1```,
 ```eu-central-1```, ```eu-west-1```, ```eu-west-2```, ```eu-west-3```, ```sa-east-1```, ```us-east-1```,
