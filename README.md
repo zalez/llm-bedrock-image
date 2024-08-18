@@ -112,6 +112,8 @@ Model-ID: ```amazon.titan-image-generator-v1```, aliases: ```amazon-titan-image-
 Model-ID: ```amazon.titan-image-generator-v2:0```, aliases: ```amazon-titan-image-v2```, ```amazon-titan-image```,
 ```ati2```, ```ati```.
 
+Includes support for the control image feature.
+
 ## Task types
 
 At this time, only the basic Text-to-Image (```TEXT_IMAGE```) task type is supported. Over time, more task types may
@@ -272,4 +274,57 @@ Default: ```standard```
 Example:
 ```bash
 llm -m ati "A parrot." -o quality premium
+```
+
+### -o condition_image PATH/TO/IMAGE.JPG
+
+The file system path to an image to use for guiding the image generation process. Multiple image formats are
+supported, including ```.jpg``` and ```.png```.
+
+**Note**: the condition image feature is only supported in the Titan Image Generator V2 model.
+
+Valid values: a string to a local image file path.
+
+Default: None
+
+Example:
+
+```bash
+llm -m ati "A parrot." -o condition_image /path/to/reference_image.jpg
+```
+
+### -o control_mode [CANNY_EDGE|SEGMENTATION]
+
+The type of image conditioning to use:
+
+* ```CANNY_EDGE```: uses edge detection on the condition image, while 
+* ```SEGMENTATION```: uses semantic segmentation.
+
+Assumes that an image has been provided through ```-o condition_image```
+
+See the [Amazon Titan Image Generator v2](https://aws.amazon.com/de/blogs/aws/amazon-titan-image-generator-v2-is-now-available-in-amazon-bedrock/) blog post for details.
+
+Valid values: ```CANNY_EDGE```, ```SEGMENTATION```
+
+Default: ```CANNY_EDGE```
+
+Example:
+
+```bash
+llm -m ati "A cartoon parrot." -o condition_image A_parrot.png -o control_mode SEGMENTATION
+```
+
+### -o control_strength FLOAT
+
+A floating-point or integer value between 0.0 and 1.0 indicating how similar the layout and composition of the
+generated image should be to the condition image. Higher values make the output more constrained to the condition image.
+
+Values: integer or floating-point between 0.0 and 1.0.
+
+Default: 0.7
+
+Example:
+
+```bash
+llm -m ati "A cartoon parrot." -o condition_image A_parrot.png -o control_strength 0.9
 ```
