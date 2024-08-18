@@ -80,6 +80,10 @@ MIN_SEED = 0
 MAX_SEED = 2147483646
 DEFAULT_SEED = 0
 
+MIN_CONTROL_STRENGTH = 0.0
+MAX_CONTROL_STRENGTH = 1.0
+DEFAULT_CONTROL_STRENGTH = 0.7
+
 # Pricing information
 
 # Taken from looking at: https://aws.amazon.com/bedrock/pricing/
@@ -87,9 +91,18 @@ DEFAULT_SEED = 0
 AWS_BEDROCK_PRICING_URL = 'https://b0.p.awsstatic.com/pricing/2.0/meteredUnitMaps/bedrock/USD/current/bedrock.json'
 AWS_LOCATIONS_URL = 'https://b0.p.awsstatic.com/locations/1.0/aws/current/locations.json'
 
+# Map model IDs to pricing table model names.
 MODEL_ID_TO_MODEL_NAME = {
     'amazon.titan-image-generator-v1': 'Titan Image Generator G1',
     'amazon.titan-image-generator-v2:0': 'Titan Image Generator V2',  # G1 V2 is correct, but the price list needs this.
+}
+
+# Map model names to supported additional options.
+MODEL_ID_TO_EXTRA_OPTIONS = {
+    'amazon.titan-image-generator-v1': [],
+    'amazon.titan-image-generator-v2:0': [
+        'condition_image', 'control_mode', 'control_strength'
+    ]
 }
 
 
@@ -176,6 +189,19 @@ class BedrockTitanImage(llm.Model):
         quality: Optional[str] = Field(
             description='The quality setting to use. Can be ’standard’ or ’premium’.',
             default='standard'
+        )
+        condition_image: Optional[str] = Field(
+            description='File system path to a condition image to guide the image generation process with.',
+            default=None
+        )
+        control_mode: Optional[str] = Field(
+            description='What type of image conditioning to use. Can be CANNY_EDGE or or SEGMENTATION.',
+            default='CANNY_EDGE'
+        )
+        control_strength: Optional[Union[int, float]] = Field(
+            description='How similar the layout and composition of the generated image should be to the condition' +
+                        'image.',
+            default=DEFAULT_CONTROL_STRENGTH
         )
 
         @field_validator('region')
@@ -270,6 +296,35 @@ class BedrockTitanImage(llm.Model):
             if str(value).lower() not in ['standard', 'premium']:
                 raise ValueError('quality must be one of [standard|premium].')
             return str(value).lower()
+
+        @field_validator('condition_image')
+        def validate_condition_image(cls, value):
+            if value is None:
+                return None
+            path = os.path.expanduser(value)
+            if not os.path.exists(path):
+                raise ValueError('condition_image must be a valid file path.')
+            return path
+
+        @field_validator('control_mode')
+        def validate_control_mode(cls, value):
+            if value is None:
+                return None
+            if str(value).upper() not in ['CANNY_EDGE', 'SEGMENTATION']:
+                raise ValueError('control_mode must be one of [CANNY_EDGE|SEGMENTATION].')
+            return str(value).upper()
+
+        @field_validator('control_strength')
+        def validate_control_strength(cls, value):
+            if value is None:
+                return None
+            if not isinstance(value, (int, float)):
+                raise ValueError('control_strength must be an integer or float.')
+            if value < MIN_CONTROL_STRENGTH or value > MAX_CONTROL_STRENGTH:
+                raise ValueError(
+                    f'control_strength must be between {MIN_CONTROL_STRENGTH} and {MAX_CONTROL_STRENGTH}.'
+                )
+            return float(value)
 
     def __init__(self, model_id):
         self.model_id = model_id
@@ -401,8 +456,7 @@ class BedrockTitanImage(llm.Model):
             )
         )
 
-    @staticmethod
-    def prompt_to_titan_params(prompt):
+    def prompt_to_titan_params(self, prompt):
         """
         Generate a Bedrock Titan image parameters dict based on the given prompt.
         :param prompt: A llm prompt object.
@@ -437,6 +491,19 @@ class BedrockTitanImage(llm.Model):
         }
         if prompt.options.negative_prompt:
             params['textToImageParams']['negativeText'] = prompt.options.negative_prompt
+
+        # Support for V2 condition images.
+        if prompt.options.condition_image:
+            if 'condition_image' not in MODEL_ID_TO_EXTRA_OPTIONS[self.model_id]:
+                raise ValueError(f'The condition_image option is not supported with the {self.model_id} model.')
+
+            # May need to add some image checking/preprocessing here in the future.
+            with open(prompt.options.condition_image, 'rb') as fp:
+                image_base64 = base64.b64encode(fp.read()).decode('utf8')
+                params['textToImageParams']['conditionImage'] = image_base64
+
+            params['textToImageParams']['controlMode'] = prompt.options.control_mode
+            params['textToImageParams']['controlStrength'] = prompt.options.control_strength
 
         return params
 
