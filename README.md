@@ -4,7 +4,7 @@
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/zalez/llm-bedrock-titan-image/blob/main/LICENSE)
 
 Plugin for Simon Willison’s [LLM](https://llm.datasette.io) CLI utility, adding support for Amazon Titan Image Generator
-G1 models on Amazon Bedrock.
+G1 models V1 and V2 on Amazon Bedrock.
 
 ## Disclaimer
 
