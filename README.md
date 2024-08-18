@@ -112,6 +112,8 @@ Model-ID: ```amazon.titan-image-generator-v1```, aliases: ```amazon-titan-image-
 Model-ID: ```amazon.titan-image-generator-v2:0```, aliases: ```amazon-titan-image-v2```, ```amazon-titan-image```,
 ```ati2```, ```ati```.
 
+Includes support for the control image feature.
+
 ## Task types
 
 At this time, only the basic Text-to-Image (```TEXT_IMAGE```) task type is supported. Over time, more task types may
