@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-bedrock-titan-image"
-version = "0.1.4"
+version = "0.1.5"
 description = "An LLM plugin for supporting Amazon Titan image generators on Amazon Bedrock."
 readme = "README.md"
 authors = [{name = "Constantin Gonzalez"}]
@@ -16,6 +16,8 @@ dependencies = [
     "llm >= 0.15",
     "pydantic >= 2.8.0",
     "boto3 >=1.35.0",
+    "webcolors >= 24.8.0",
+    "Pillow >= 10.4.0",
 ]
 requires-python = ">=3.8"
 

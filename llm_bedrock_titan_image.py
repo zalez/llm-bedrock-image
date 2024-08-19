@@ -22,18 +22,27 @@ import os
 import platform
 from typing import Optional, Union
 import concurrent.futures
+import re
+from io import BytesIO
 
 import requests
 import llm
 import boto3
 from pydantic import field_validator, Field
+import webcolors
+from PIL import Image
 
 
 # Constants
 
 DEBUG = os.environ.get('DEBUG', 'false').lower() in ['true', '1']
 
-# Model defaults
+# Model options and defaults
+
+TASKS = ['TEXT_IMAGE', 'COLOR_GUIDED_GENERATION']
+DEFAULT_TASK = 'TEXT_IMAGE'
+
+MAX_PROMPT_LENGTH = 512
 
 MIN_NUMBER_OF_IMAGES = 1
 MAX_NUMBER_OF_IMAGES = 5
@@ -84,6 +93,13 @@ MIN_CONTROL_STRENGTH = 0.0
 MAX_CONTROL_STRENGTH = 1.0
 DEFAULT_CONTROL_STRENGTH = 0.7
 
+MIN_COLORS = 1
+MAX_COLORS = 10
+
+MIN_INPUT_IMAGE_LENGTH = 256
+MAX_INPUT_IMAGE_LENGTH = 1408
+SUPPORTED_INPUT_IMAGE_FORMATS = ['png', 'jpg', 'jpeg']
+
 # Pricing information
 
 # Taken from looking at: https://aws.amazon.com/bedrock/pricing/
@@ -103,6 +119,12 @@ MODEL_ID_TO_EXTRA_OPTIONS = {
     'amazon.titan-image-generator-v2:0': [
         'condition_image', 'control_mode', 'control_strength'
     ]
+}
+
+# Map model names to supported task types.
+MODEL_ID_TO_TASK_TYPES = {
+    'amazon.titan-image-generator-v1': ['TEXT_IMAGE'],
+    'amazon.titan-image-generator-v2:0': ['TEXT_IMAGE', 'COLOR_GUIDED_GENERATION']
 }
 
 
@@ -150,6 +172,10 @@ class BedrockTitanImage(llm.Model):
                         'if set. If none is configured and auto_region is true, this plugin will automatically ' +
                         'choose a supported and enabled region. If this is set, the auto_region option is ignored.',
             default=None
+        )
+        task: str = Field(
+            description='The task to perform. By default, it is TEXT_IMAGE for generating an image from text.',
+            default='TEXT_IMAGE'
         )
         auto_region: Optional[Union[str, bool]] = Field(
             description='Choose a supported AWS Region automatically if none is configured or the model isn’t ' +
@@ -203,6 +229,15 @@ class BedrockTitanImage(llm.Model):
                         'image.',
             default=DEFAULT_CONTROL_STRENGTH
         )
+        colors: Optional[str] = Field(
+            description='A list of hex color codes for conditioning the colors used when generating the image.',
+            default=None
+        )
+        reference_image: Optional[str] = Field(
+            description='File system path to a color reference image for guiding the colors in the image generation ' +
+            'process with.',
+            default=None
+        )
 
         @field_validator('region')
         def validate_region(cls, value):
@@ -212,6 +247,15 @@ class BedrockTitanImage(llm.Model):
             if str(value).lower() not in bedrock_regions:
                 raise ValueError(f'region must be one of the supported Amazon Bedrock regions: {bedrock_regions}.')
             return str(value).lower()
+
+        @field_validator('task')
+        def validate_task(cls, value):
+            candidate_tasks = [t for t in TASKS if value.upper() in t]
+            if not candidate_tasks:
+                raise ValueError(f'task needs to be one of, or an unambiguous substring of: {TASKS}')
+            if len(candidate_tasks) > 1:
+                raise ValueError(f'task is ambiguous, it matches more than one task: {candidate_tasks}')
+            return candidate_tasks[0]
 
         @field_validator('auto_region')
         def validate_auto_region(cls, value):
@@ -325,6 +369,23 @@ class BedrockTitanImage(llm.Model):
                     f'control_strength must be between {MIN_CONTROL_STRENGTH} and {MAX_CONTROL_STRENGTH}.'
                 )
             return float(value)
+
+        @field_validator('colors')
+        def validate_colors(cls, value):
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                raise ValueError('colors must be a string with comma-separated colors.')
+            return value
+
+        @field_validator('reference_image')
+        def validate_reference_image(cls, value):
+            if value is None:
+                return None
+            path = os.path.expanduser(value)
+            if not os.path.exists(path):
+                raise ValueError('reference_image must be a valid file path.')
+            return path
 
     def __init__(self, model_id):
         self.model_id = model_id
@@ -456,13 +517,133 @@ class BedrockTitanImage(llm.Model):
             )
         )
 
+    @staticmethod
+    def load_and_preprocess_image(image_path):
+        """
+        Load and pre-process the image from the given image path for use with Titan Image Generator models.
+        * Resize if needed.
+        * Convert into a supported format if needed.
+        * Do nothing if the image is already compatible.
+
+        :param image_path: An image file path.
+        :return: The base64 encoded image file bytes of the (preprocessed) image to include inside a Titan Image
+                 Generator request parameter.
+        """
+        with open(image_path, "rb") as fp:
+            img_bytes = fp.read()
+
+        with Image.open(BytesIO(img_bytes)) as img:
+            img_format = img.format
+            width, height = img.size
+            if width < MIN_INPUT_IMAGE_LENGTH or height < MIN_INPUT_IMAGE_LENGTH:
+                raise ValueError(
+                    'The minimum length of the input image is too short. Min image length: ' +
+                    f'{MIN_INPUT_IMAGE_LENGTH}, request input image min length: {min(width, height)}.'
+                )
+            if width > MAX_INPUT_IMAGE_LENGTH or height > MAX_INPUT_IMAGE_LENGTH:
+                # Resize the image while preserving the aspect ratio
+                img.thumbnail((MAX_INPUT_IMAGE_LENGTH, MAX_INPUT_IMAGE_LENGTH))
+
+            # Change format if necessary
+            if (
+                img_format.lower() in SUPPORTED_INPUT_IMAGE_FORMATS and
+                img.size == (width, height)  # Original size, no resize needed
+            ):
+                return base64.b64encode(img_bytes).decode('utf8')
+
+            # If not, re-export the image with the appropriate format
+            with BytesIO() as buffer:
+                img.save(buffer, format='PNG')
+                return base64.b64encode(buffer.getvalue()).decode('utf8')
+
+    def generate_text_image_params(self, prompt_text):
+        """
+        Generate the TEXT_IMAGE specific parameter block out of the given prompt text, using any options available from
+        object’s options object.
+        """
+        text_to_image_params = {
+            'text': prompt_text
+        }
+        if self.options.negative_prompt:
+            text_to_image_params['negativeText'] = self.options.negative_prompt
+
+        # Support for V2 condition images.
+        if self.options.condition_image:
+            if 'condition_image' not in MODEL_ID_TO_EXTRA_OPTIONS[self.model_id]:
+                raise ValueError(f'The condition_image option is not supported with the {self.model_id} model.')
+
+            text_to_image_params['conditionImage'] = self.load_and_preprocess_image(self.options.condition_image)
+
+        text_to_image_params['controlMode'] = self.options.control_mode
+        text_to_image_params['controlStrength'] = self.options.control_strength
+
+        return text_to_image_params
+
+    @staticmethod
+    def parse_colors(colors):
+        """
+        Parse the given colors string with comma-separated colors into a list of well-defined, 6-digit hex colors.
+        Support human-friendly color names through the webcolors library.
+        Also, perform some semantic checking of the color list based on the Titan Image Generator V2
+        specs.
+        """
+        color_list = [s.strip() for s in colors.split(',')]
+
+        if len(color_list) < MIN_COLORS:
+            raise ValueError(f'colors must have at least one color.')
+        if len(color_list) > MAX_COLORS:
+            raise ValueError(f'colors cannot have more than {MAX_COLORS} colors.')
+
+        return [
+            webcolors.normalize_hex(color)
+            if re.match(r'^#([A-Fa-f0-9]{6}|[A-Fa-f0-9]{3})$', color)
+            else webcolors.name_to_hex(color)  # Raises ValueError if name is unknown.
+            for color in color_list
+        ]
+
+    def generate_color_guided_generation_params(self, prompt_text):
+        """
+        Generate the COLOR_GUIDED_GENERATION specific parameter block out of the given options object.
+        Assumes that any options are available from self.options.
+        """
+        if 'COLOR_GUIDED_GENERATION' not in MODEL_ID_TO_TASK_TYPES[self.model_id]:
+            raise ValueError(f'The COLOR_GUIDED_GENERATION option is not supported with the {self.model_id} model.')
+
+        if not self.options.colors:
+            raise ValueError(
+                'A set of colors to guide the image generation process with is required for COLOR_GUIDED_GENERATION ' +
+                'tasks.'
+            )
+
+        color_guided_generation_params = {
+            'text': prompt_text,
+            'colors': self.parse_colors(self.options.colors)
+        }
+        if self.options.negative_prompt:
+            color_guided_generation_params['negativeText'] = self.options.negative_prompt
+
+        if self.options.reference_image:
+            color_guided_generation_params['referenceImage'] = self.load_and_preprocess_image(
+                self.options.reference_image
+            )
+
+        return color_guided_generation_params
+
     def prompt_to_titan_params(self, prompt):
         """
         Generate a Bedrock Titan image parameters dict based on the given prompt.
         :param prompt: A llm prompt object.
         :return: A dict of Bedrock Titan image parameters.
         """
-        if len(prompt.prompt) > 512:
+
+        # Build and validate the text prompt. Combine it with the system prompt if any.
+        prompt_text = prompt.prompt
+        if prompt.system:
+            prompt_text = prompt.system + ' ' + prompt_text
+
+        if not prompt_text.strip():
+            raise ValueError('Prompt cannot be empty.')
+        if len(prompt_text) > MAX_PROMPT_LENGTH:
             raise ValueError(
                 "Prompt is too long. Maximum prompt length for Amazon Titan Image " +
                 "Generator G1 models is 512 characters."
@@ -476,10 +657,6 @@ class BedrockTitanImage(llm.Model):
             )
 
         params = {
-            'taskType': 'TEXT_IMAGE',
-            'textToImageParams': {
-                'text': prompt.prompt
-            },
             'imageGenerationConfig': {
                 'width': size[0],
                 'height': size[1],
@@ -489,21 +666,18 @@ class BedrockTitanImage(llm.Model):
                 'quality': prompt.options.quality
             }
         }
-        if prompt.options.negative_prompt:
-            params['textToImageParams']['negativeText'] = prompt.options.negative_prompt
 
-        # Support for V2 condition images.
-        if prompt.options.condition_image:
-            if 'condition_image' not in MODEL_ID_TO_EXTRA_OPTIONS[self.model_id]:
-                raise ValueError(f'The condition_image option is not supported with the {self.model_id} model.')
+        task_type = prompt.options.task
+        if task_type == 'TEXT_IMAGE':
+            params['taskType'] = task_type
+            params['textToImageParams'] = self.generate_text_image_params(prompt_text)
+        elif task_type == 'COLOR_GUIDED_GENERATION':
+            params['taskType'] = task_type
+            params['colorGuidedGenerationParams'] = self.generate_color_guided_generation_params(prompt_text)
+        else:
+            raise ValueError(f'Invalid task type {task_type}.')
 
-            # May need to add some image checking/preprocessing here in the future.
-            with open(prompt.options.condition_image, 'rb') as fp:
-                image_base64 = base64.b64encode(fp.read()).decode('utf8')
-                params['textToImageParams']['conditionImage'] = image_base64
-
-            params['textToImageParams']['controlMode'] = prompt.options.control_mode
-            params['textToImageParams']['controlStrength'] = prompt.options.control_strength
+        print_debug('Titan params', params)
 
         return params
 
