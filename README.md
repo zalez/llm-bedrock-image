@@ -78,8 +78,8 @@ An easy way to use this plugin is:
 llm -m ati "A parrot."
 ```
 
-If everything is set up correctly, this will generate an image of a parrot and save it as "A_parrot.png" in your
-current file system path:
+If everything is set up correctly, this will generate an image of a parrot, save it as "A_parrot.png" in your
+current file system path, and open it with your operating system’s default image display app:
 
 ![A parrot.](A_parrot.png)
 
@@ -87,9 +87,9 @@ If a file with the same name exists already (likely, since this repository has o
 version of the filename, like ```A_parrot_1.png```.
 
 The model identifier "ati" is shorthand for "amazon.titan-image-generator-v2:0", the model we specified here.
-"A parrot." is the prompt used to generate the image. Note that while LLM assumes a conversation with an LLM, we’re
-merely generating images here. However, we do handle useful output, like the resulting filename, as if we
-had received a conversation response from a "chat" LLM. This is logged by LLM like any other LLM conversation.
+"A parrot." is the prompt (up to 512 characters) used to generate the image. Note that while LLM assumes a conversation
+with an LLM, we’re merely generating images here. However, we do handle useful output, like the resulting filename, as
+if we had received a conversation response from a "chat" LLM. This is logged by LLM like any other LLM conversation.
 
 When crafting prompts, check out the
 [Amazon Titan Image Generator Prompt Engineering Best Practices documentation](https://d2eo22ngex1n9g.cloudfront.net/Documentation/User+Guides/Titan/Amazon+Titan+Image+Generator+Prompt+Engineering+Guidelines.pdf)
@@ -116,8 +116,13 @@ Includes support for the control image feature.
 
 ## Task types
 
-At this time, only the basic Text-to-Image (```TEXT_IMAGE```) task type is supported. Over time, more task types may
-be added.
+This plugin currently supports the following task types:
+
+* **TEXT_IMAGE**: Generate an image using a text prompt. Optionally (V2 only), Provide an additional input
+  conditioning image along with a text prompt to generate an image that follows the layout and composition of the
+  conditioning image.
+* **COLOR_GUIDED_GENERATION** (V2 only): Provide a list of hex color codes or CSS3 color names along with a text prompt
+  to generate an image that follows the color palette
 
 ## Options
 
@@ -128,7 +133,7 @@ auto_region (see below) is true, this plugin will automatically choose a support
 
 If this option is set, the auto_region option is ignored.
 
-Valid values: Any AWS Region where the Amazon Bedrock service is available. As of 2024-08-16, these are: 
+Valid regions are any AWS Region where the Amazon Bedrock service is available. As of 2024-08-19, these are: 
 ```ap-northeast-1```, ```ap-south-1```, ```ap-southeast-1```, ```ap-southeast-2```, ```ca-central-1```,
 ```eu-central-1```, ```eu-west-1```, ```eu-west-2```, ```eu-west-3```, ```sa-east-1```, ```us-east-1```,
 ```us-west-2```.
@@ -155,13 +160,23 @@ find one where you have requested access to. If you want to control the region t
 chosen Region up in the ```ÀWS_DEFAULT_REGION``` environment variable and set this option to "```false```", "```off```",
 or "```0```".
 
-Valid values: ```true```, ```false```, ```on```, ```off```, ```0```, ```1```.
-
 Default: ```true```
 
 Example:
 ```bash
 llm -m ati "A parrot." -o auto_region off
+```
+
+### -o task [TEXT_IMAGE|COLOR_GUIDED_GENERATION]
+
+The task type to execute. See *Task types* above for available task types and what they do.
+Any upper/lower/mixed case string is allowed that matches exactly one of the available task types unambiguously.
+
+Default: ```TEXT_IMAGE```
+
+Example:
+```bash
+llm -m ati "A parrot." -o task image
 ```
 
 ### -o auto_open [true|false|on|off|0|1]
@@ -182,8 +197,8 @@ llm -m ati "A parrot." -o auto_open off
 
 Specify a second prompt describing what to avoid generating in the image.
 
-Valid values: Any string describing what not to generate. Don’t use "no" or other negations here, specify what to
-avoid in positive words.
+Valid text: Any string up to 512 characters describing what not to generate. Specify what to avoid in positive words
+without using "no" or other negations.
 
 Default: None
 
@@ -196,7 +211,7 @@ llm -m ati "A mouse." -o negative_prompt "computer, electronics, device"
 
 The number of images to generate.
 
-Valid values: integers from 1 through 5.
+Valid values: 1 - 5
 
 Default: 1
 
@@ -210,7 +225,7 @@ llm -m ati "A parrot." -o number_of_images 3
 Specifies how strongly the generated image should adhere to the prompt. Use a lower value to introduce more randomness
 in the generation
 
-Valid values: Any floating-point number between 1.1 and 10.0.
+Valid values: floating-point numbers between 1.1 and 10.0.
 
 Default: 8.0
 
@@ -225,7 +240,7 @@ The height of the image to generate in pixels. See the
 [Amazon Titan Image Generator G1 documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-titan-image.html)
 for valid width/height combinations.
 
-Valid values: one of 320, 384, 448, 512, 576, 640, 768, 704, 768, 896, 1024, 1152, 1280, 1408.
+Valid values include one of: 320, 384, 448, 512, 576, 640, 768, 704, 768, 896, 1024, 1152, 1280, 1408.
 
 Default: 1024
 
@@ -240,7 +255,7 @@ The width of the image to generate in pixels. See the
 [Amazon Titan Image Generator G1 documentation](https://docs.aws.amazon.com/bedrock/latest/userguide/model-parameters-titan-image.html)
 for valid width/height combinations.
 
-Valid values: one of 320, 384, 448, 512, 576, 640, 768, 704, 768, 896, 1024, 1152, 1173, 1280, 1408.
+Valid values include one of: 320, 384, 448, 512, 576, 640, 768, 704, 768, 896, 1024, 1152, 1173, 1280, 1408.
 
 Default: 1024
 
@@ -254,7 +269,7 @@ llm -m ati "A parrot." -o width 768 -o height 1152
 Use this to control and reproduce results. Determines the initial noise setting. Use the same seed and the same
 settings as a previous run to allow inference to create a similar image.
 
-Valid values: any integer between 0 and 2147483646.
+Valid values: 0 - 2147483646
 
 Default: 0
 
@@ -266,8 +281,6 @@ llm -m ati "A dolphin." -o seed 42
 ### -o quality [standard|premium]
 
 The quality to generate image with. Use "standard" for drafting and "premium" to get finder details.
-
-Valid values: ```standard```, ```premium```
 
 Default: ```standard```
 
@@ -282,8 +295,6 @@ The file system path to an image to use for guiding the image generation process
 supported, including ```.jpg``` and ```.png```.
 
 **Note**: the condition image feature is only supported in the Titan Image Generator V2 model.
-
-Valid values: a string to a local image file path.
 
 Default: None
 
@@ -304,8 +315,6 @@ Assumes that an image has been provided through ```-o condition_image```
 
 See the [Amazon Titan Image Generator v2](https://aws.amazon.com/de/blogs/aws/amazon-titan-image-generator-v2-is-now-available-in-amazon-bedrock/) blog post for details.
 
-Valid values: ```CANNY_EDGE```, ```SEGMENTATION```
-
 Default: ```CANNY_EDGE```
 
 Example:
@@ -314,12 +323,12 @@ Example:
 llm -m ati "A cartoon parrot." -o condition_image A_parrot.png -o control_mode SEGMENTATION
 ```
 
-### -o control_strength FLOAT
+### -o control_strength [FLOAT|INT]
 
 A floating-point or integer value between 0.0 and 1.0 indicating how similar the layout and composition of the
 generated image should be to the condition image. Higher values make the output more constrained to the condition image.
 
-Values: integer or floating-point between 0.0 and 1.0.
+Valid values include integers or floating-point numbers between 0.0 and 1.0.
 
 Default: 0.7
 
@@ -327,4 +336,38 @@ Example:
 
 ```bash
 llm -m ati "A cartoon parrot." -o condition_image A_parrot.png -o control_strength 0.9
+```
+
+### -o colors COLOR_LIST
+
+A comma-separated list of  1 - 10 hex color values or CSS3 color names for conditioning the colors used to generate
+the image. Only supported with the ```COLOR_GUIDED_GENERATION``` task type, and required for this task.
+
+Valid values: A string of comma-separated hex color values or CSS3 color names.
+
+Default: None
+
+Example:
+
+```bash
+llm -m ati -o task COLOR -o colors '#ff8800,yellow,blue' 'A parrot.'
+```
+
+### -o reference_image PATH/TO/IMAGE.JPG
+
+The file system path to an image to use for guiding the colors style during a ```COLOR_GUIDED_GENERATION``` task.
+Image formats supported by Titan Image Generator models includ ```.jpg``` and ```.png```, however, the plugin will do
+its best to identify the image format and transcode the image into ```.png``` if necessary. Images must have a minimum
+image length of 256 pixels on either side and a maximum length of 1408 pixels on the longer side. The plugin will
+automatically shrink images that are too large to comply with the maximum supported image size.
+
+**Note**: the reference image feature is only supported in the Titan Image Generator V2 model and when using the 
+```COLOR_GUIDED_GENERATION``` task.
+
+Default: None
+
+Example:
+
+```bash
+llm -m ati -o task COLOR -o colors "yellow, blue" -o reference_image design_example.jpg
 ```
