@@ -39,9 +39,6 @@ DEBUG = os.environ.get('DEBUG', 'false').lower() in ['true', '1']
 
 # Model options and defaults
 
-TASKS = ['TEXT_IMAGE', 'COLOR_GUIDED_GENERATION']
-DEFAULT_TASK = 'TEXT_IMAGE'
-
 MAX_PROMPT_LENGTH = 512
 
 MIN_NUMBER_OF_IMAGES = 1
@@ -117,15 +114,18 @@ MODEL_ID_TO_MODEL_NAME = {
 MODEL_ID_TO_EXTRA_OPTIONS = {
     'amazon.titan-image-generator-v1': [],
     'amazon.titan-image-generator-v2:0': [
-        'condition_image', 'control_mode', 'control_strength'
+        'image', 'control_mode', 'control_strength'
     ]
 }
 
 # Map model names to supported task types.
 MODEL_ID_TO_TASK_TYPES = {
     'amazon.titan-image-generator-v1': ['TEXT_IMAGE'],
-    'amazon.titan-image-generator-v2:0': ['TEXT_IMAGE', 'COLOR_GUIDED_GENERATION']
+    'amazon.titan-image-generator-v2:0': ['TEXT_IMAGE', 'COLOR_GUIDED_GENERATION', 'BACKGROUND_REMOVAL']
 }
+
+TASKS = list({task for tasks in MODEL_ID_TO_TASK_TYPES.values() for task in tasks})
+DEFAULT_TASK = 'TEXT_IMAGE'
 
 
 # Functions
@@ -216,9 +216,13 @@ class BedrockTitanImage(llm.Model):
             description='The quality setting to use. Can be ’standard’ or ’premium’.',
             default='standard'
         )
-        condition_image: Optional[str] = Field(
-            description='File system path to a condition image to guide the image generation process with.',
+        image: Optional[str] = Field(
+            description='File system path to an input image used for certain task types.',
             default=None
+        )
+        resize_image: Optional[Union[str, bool]] = Field(
+            description="Automatically resize the image if it doesn't conform to supported size constraints.",
+            default=True
         )
         control_mode: Optional[str] = Field(
             description='What type of image conditioning to use. Can be CANNY_EDGE or or SEGMENTATION.',
@@ -231,11 +235,6 @@ class BedrockTitanImage(llm.Model):
         )
         colors: Optional[str] = Field(
             description='A list of hex color codes for conditioning the colors used when generating the image.',
-            default=None
-        )
-        reference_image: Optional[str] = Field(
-            description='File system path to a color reference image for guiding the colors in the image generation ' +
-            'process with.',
             default=None
         )
 
@@ -260,7 +259,7 @@ class BedrockTitanImage(llm.Model):
         @field_validator('auto_region')
         def validate_auto_region(cls, value):
             if value is None:
-                return None
+                return True  # Default
             if str(value).lower() not in ['true', 'false', 'on', 'off', '0', '1']:
                 raise ValueError('auto_region must be one of true, false, on, off, 0, 1.')
             return str(value).lower() in ['true', 'on', '1']
@@ -268,7 +267,7 @@ class BedrockTitanImage(llm.Model):
         @field_validator('auto_open')
         def validate_auto_open(cls, value):
             if value is None:
-                return None
+                return True  # Default
             if str(value).lower() not in ['true', 'false', 'on', 'off', '0', '1']:
                 raise ValueError('auto_open must be one of true, false, on, off, 0, 1.')
             return str(value).lower() in ['true', 'on', '1']
@@ -341,14 +340,22 @@ class BedrockTitanImage(llm.Model):
                 raise ValueError('quality must be one of [standard|premium].')
             return str(value).lower()
 
-        @field_validator('condition_image')
-        def validate_condition_image(cls, value):
+        @field_validator('image')
+        def validate_image(cls, value):
             if value is None:
                 return None
             path = os.path.expanduser(value)
             if not os.path.exists(path):
-                raise ValueError('condition_image must be a valid file path.')
+                raise ValueError('image must be a valid file path.')
             return path
+
+        @field_validator('resize_image')
+        def validate_resize_image(cls, value):
+            if value is None:
+                return True  # Default
+            if str(value).lower() not in ['true', 'false', 'on', 'off', '0', '1']:
+                raise ValueError('resize_image must be one of true, false, on, off, 0, 1.')
+            return str(value).lower() in ['true', 'on', '1']
 
         @field_validator('control_mode')
         def validate_control_mode(cls, value):
@@ -377,15 +384,6 @@ class BedrockTitanImage(llm.Model):
             if not isinstance(value, str):
                 raise ValueError('colors must be a string with comma-separated colors.')
             return value
-
-        @field_validator('reference_image')
-        def validate_reference_image(cls, value):
-            if value is None:
-                return None
-            path = os.path.expanduser(value)
-            if not os.path.exists(path):
-                raise ValueError('reference_image must be a valid file path.')
-            return path
 
     def __init__(self, model_id):
         self.model_id = model_id
@@ -517,8 +515,7 @@ class BedrockTitanImage(llm.Model):
             )
         )
 
-    @staticmethod
-    def load_and_preprocess_image(image_path):
+    def load_and_preprocess_image(self, image_path):
         """
         Load and pre-process the image from the given image path for use with Titan Image Generator models.
         * Resize if needed.
@@ -535,14 +532,37 @@ class BedrockTitanImage(llm.Model):
         with Image.open(BytesIO(img_bytes)) as img:
             img_format = img.format
             width, height = img.size
-            if width < MIN_INPUT_IMAGE_LENGTH or height < MIN_INPUT_IMAGE_LENGTH:
-                raise ValueError(
-                    'The minimum length of the input image is too short. Min image length: ' +
-                    f'{MIN_INPUT_IMAGE_LENGTH}, request input image min length: {min(width, height)}.'
-                )
+            new_width = width
+            new_height = height
+            if min(width, height) < MIN_INPUT_IMAGE_LENGTH:
+                if self.options.resize_image:
+                    resize = MIN_INPUT_IMAGE_LENGTH / min(width, height)
+                    new_width = int(width * resize + 0.5)
+                    new_height = int(height * resize + 0.5)
+                    if max(width, height) > MAX_INPUT_IMAGE_LENGTH:
+                        raise ValueError(
+                            'The minimum length of the input image is too short. Minimum image length: ' +
+                            f'{MIN_INPUT_IMAGE_LENGTH}, request input image minimum length: {min(width, height)}.\n' +
+                            'Unable to resize the image because then the maximum length would become too long.'
+                        )
+                else:
+                    raise ValueError(
+                        'The minimum length of the input image is too short. Minimum image length: ' +
+                        f'{MIN_INPUT_IMAGE_LENGTH}, request input image minimum length: {min(width, height)}.'
+                    )
             if width > MAX_INPUT_IMAGE_LENGTH or height > MAX_INPUT_IMAGE_LENGTH:
-                # Resize the image while preserving the aspect ratio
-                img.thumbnail((MAX_INPUT_IMAGE_LENGTH, MAX_INPUT_IMAGE_LENGTH))
+                if self.options.resize_image:
+                    resize = MAX_INPUT_IMAGE_LENGTH / max(width, height)
+                    new_width = int(width * resize)
+                    new_height = int(height * resize)
+                else:
+                    raise ValueError(
+                        'The maximum length of the input image is too long. Maximum image length: ' +
+                        f'{MAX_INPUT_IMAGE_LENGTH}, request input image maximum length: {max(width, height)}.'
+                    )
+            if new_width != width or new_height != height:
+                # Resize the image if needed
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
             # Change format if necessary
             if (
@@ -568,14 +588,14 @@ class BedrockTitanImage(llm.Model):
             text_to_image_params['negativeText'] = self.options.negative_prompt
 
         # Support for V2 condition images.
-        if self.options.condition_image:
-            if 'condition_image' not in MODEL_ID_TO_EXTRA_OPTIONS[self.model_id]:
-                raise ValueError(f'The condition_image option is not supported with the {self.model_id} model.')
+        if self.options.image:
+            if 'image' not in MODEL_ID_TO_EXTRA_OPTIONS[self.model_id]:
+                raise ValueError(f'Condition images are not supported with the {self.model_id} model.')
 
-            text_to_image_params['conditionImage'] = self.load_and_preprocess_image(self.options.condition_image)
+            text_to_image_params['conditionImage'] = self.load_and_preprocess_image(self.options.image)
 
-        text_to_image_params['controlMode'] = self.options.control_mode
-        text_to_image_params['controlStrength'] = self.options.control_strength
+            text_to_image_params['controlMode'] = self.options.control_mode
+            text_to_image_params['controlStrength'] = self.options.control_strength
 
         return text_to_image_params
 
@@ -622,12 +642,28 @@ class BedrockTitanImage(llm.Model):
         if self.options.negative_prompt:
             color_guided_generation_params['negativeText'] = self.options.negative_prompt
 
-        if self.options.reference_image:
+        if self.options.image:
             color_guided_generation_params['referenceImage'] = self.load_and_preprocess_image(
-                self.options.reference_image
+                self.options.image
             )
 
         return color_guided_generation_params
+
+    def generate_background_removal_params(self):
+        """
+        Generate the BACKGROUND_REMOVAL specific parameter block for background removal tasks.
+        This task does not use any prompt text.
+        Assumes that any options are available from self.options.
+        """
+        if 'BACKGROUND_REMOVAL' not in MODEL_ID_TO_TASK_TYPES[self.model_id]:
+            raise ValueError(f'The BACKGROUND_REMOVAL task type is not supported with the {self.model_id} model.')
+
+        if self.options.image:
+            return {
+                'image': self.load_and_preprocess_image(self.options.image)
+            }
+        else:
+            ValueError('An input image is required for BACKGROUND_REMOVAL tasks.')
 
     def prompt_to_titan_params(self, prompt):
         """
@@ -641,7 +677,7 @@ class BedrockTitanImage(llm.Model):
         if prompt.system:
             prompt_text = prompt.system + ' ' + prompt_text
 
-        if not prompt_text.strip():
+        if not prompt_text.strip() and not prompt.options.task == 'BACKGROUND_REMOVAL':
             raise ValueError('Prompt cannot be empty.')
         if len(prompt_text) > MAX_PROMPT_LENGTH:
             raise ValueError(
@@ -668,12 +704,13 @@ class BedrockTitanImage(llm.Model):
         }
 
         task_type = prompt.options.task
+        params['taskType'] = task_type
         if task_type == 'TEXT_IMAGE':
-            params['taskType'] = task_type
             params['textToImageParams'] = self.generate_text_image_params(prompt_text)
         elif task_type == 'COLOR_GUIDED_GENERATION':
-            params['taskType'] = task_type
             params['colorGuidedGenerationParams'] = self.generate_color_guided_generation_params(prompt_text)
+        elif task_type == 'BACKGROUND_REMOVAL':
+            params['backgroundRemovalParams'] = self.generate_background_removal_params()
         else:
             raise ValueError(f'Invalid task type {task_type}.')
 
@@ -701,6 +738,8 @@ class BedrockTitanImage(llm.Model):
             base = base.replace("__", "_")
 
         base = base.strip('_')
+        if not base:
+            base = "result"
 
         # Avoid overwriting existing files with the same name.
         i = 1

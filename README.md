@@ -42,20 +42,22 @@ for execution. By setting the ```AWS_DEFAULT_REGION``` environment variable, and
 ## Installation
 
 This plugin assumes you have a working installation of Simon Willison’s LLM tool. If not, see:
-[LLM Setup](https://llm.datasette.io/en/stable/setup.html)
+[LLM Setup](https://llm.datasette.io/en/stable/setup.html).
 
-Install from GitHub:
+The plugin is available from PyPi as: [llm-bedrock-titan-image](https://pypi.org/project/llm-bedrock-titan-image/), so
+it can be easily installed from ```llm``` itself:
+
+```bash
+llm install llm-bedrock-titan-image
+```
+
+Install from GitHub is also possible, but only necessary if the main commit hasn't been published yet on PyPi, or if
+you have forked/modified your own version:
 
 ```bash
 git clone https://github.com/zalez/llm-bedrock-titan-image.git
 cd <directory you cloned into>
 llm install -e .
-```
-
-At some point, this will be published onto PyPi, after which you should be able to just say:
-
-```bash
-llm install llm-bedrock-titan-image
 ```
 
 ## Configuration
@@ -114,15 +116,40 @@ Model-ID: ```amazon.titan-image-generator-v2:0```, aliases: ```amazon-titan-imag
 
 Includes support for the control image feature.
 
+Example for using the older V1 model:
+
+```bash
+llm -m amazon-titan-image-v1 "A parrot."
+```
+
 ## Task types
 
 This plugin currently supports the following task types:
 
-* **TEXT_IMAGE**: Generate an image using a text prompt. Optionally (V2 only), Provide an additional input
-  conditioning image along with a text prompt to generate an image that follows the layout and composition of the
-  conditioning image.
-* **COLOR_GUIDED_GENERATION** (V2 only): Provide a list of hex color codes or CSS3 color names along with a text prompt
-  to generate an image that follows the color palette
+### TEXT_IMAGE
+
+Generate an image using a text prompt.
+
+Optionally (V2 only), Provide an additional input conditioning image along with a text prompt to generate an image that
+follows the layout and composition of the conditioning image.
+
+Examples:
+
+```bash
+llm -m ati -o task TEXT_IMAGE "A parrot."
+llm -m ati -o task TEXT_IMAGE "A parrot." -o image /path/to/condition_image.jpg
+```
+
+### COLOR_GUIDED_GENERATION
+
+Only supported with the V2 model. Provide a list of hex color codes or CSS3 color names along with a text prompt
+to generate an image that follows the color palette. Also supports adding an image to guide the colory styling.
+
+Examples:
+```bash
+llm -m ati -o task COLOR -o colors '#ff8800,yellow,blue' 'A parrot.'
+llm -m ati -o task COLOR -o colors "yellow, blue" -o image design_example.jpg
+```
 
 ## Options
 
@@ -183,8 +210,6 @@ llm -m ati "A parrot." -o task image
 
 Automatically opens the image after generation using the operating system’s default image viewer. This has been
 successfully tested on macOS, but should work on Windows and Linux, too.
-
-Valid values: ```true```, ```false```, ```on```, ```off```, ```0```, ```1```.
 
 Default: ```true```
 
@@ -289,29 +314,50 @@ Example:
 llm -m ati "A parrot." -o quality premium
 ```
 
-### -o condition_image PATH/TO/IMAGE.JPG
+### -o image PATH/TO/IMAGE.JPG
 
-The file system path to an image to use for guiding the image generation process. Multiple image formats are
-supported, including ```.jpg``` and ```.png```.
+(Titan Image Generator V2 only.)
+The file system path to an image to use for guiding certain aspects of certain tasks:
 
-**Note**: the condition image feature is only supported in the Titan Image Generator V2 model.
+* For ```TEXT_IMAGE```, the image is used to guide the overall image generation process.
+* For ```COLOR_GUIDED_GENERATION```, the image supplies a color theme for the model to use.
+* For ```BACKGROUND REMOVAL```, this is the image to remove background from.
+
+While the image formats supported by the models include ```.jpg``` and ```.png```, this plugin will automatically
+transcode other formats into ```.png``` if necessary.
+
+Images should have a minimum of 256 pixels on either side and a maximum of 1408 pixels on the longer side. The
+```-o resize_image``` (default: on) can be used to automatically adjust the image size to fit the larges supported one.
 
 Default: None
 
 Example:
 
 ```bash
-llm -m ati "A parrot." -o condition_image /path/to/reference_image.jpg
+llm -m ati "A parrot." -o image /path/to/reference_image.jpg
+llm -m ati "A parrot." -o task COLOR -o colors "yellow, blue" -o image design_example.jpg
+llm -m ati -o task BACKGROUND -o image A_parrot.jpg ""  # NOTE: An empty prompt is required here, otherwise llm will wait for input.
+```
+
+### -o resize_image [true|false|on|off|0|1]
+
+Resize the image if it doesn't conform to the model's supported image sizes.
+
+Default: True
+Example:
+
+```bash
+llm -m ati "A parrot." -o resize_image off -o image /path/to/reference_image.jpg
 ```
 
 ### -o control_mode [CANNY_EDGE|SEGMENTATION]
 
-The type of image conditioning to use:
+The type of image conditioning to use with ```TEXT_IMAGE``` tasks (V2 only) when supplying a condition image:
 
 * ```CANNY_EDGE```: uses edge detection on the condition image, while 
 * ```SEGMENTATION```: uses semantic segmentation.
 
-Assumes that an image has been provided through ```-o condition_image```
+Assumes that an image has been provided through ```-o image```
 
 See the [Amazon Titan Image Generator v2](https://aws.amazon.com/de/blogs/aws/amazon-titan-image-generator-v2-is-now-available-in-amazon-bedrock/) blog post for details.
 
@@ -320,13 +366,14 @@ Default: ```CANNY_EDGE```
 Example:
 
 ```bash
-llm -m ati "A cartoon parrot." -o condition_image A_parrot.png -o control_mode SEGMENTATION
+llm -m ati "A cartoon parrot." -o image A_parrot.png -o control_mode SEGMENTATION
 ```
 
 ### -o control_strength [FLOAT|INT]
 
 A floating-point or integer value between 0.0 and 1.0 indicating how similar the layout and composition of the
-generated image should be to the condition image. Higher values make the output more constrained to the condition image.
+generated image should be to the supplied image for ```TEXT_IMAGE``` tasks which add a condition image. Higher values
+make the output more constrained to the condition image.
 
 Valid values include integers or floating-point numbers between 0.0 and 1.0.
 
@@ -335,7 +382,7 @@ Default: 0.7
 Example:
 
 ```bash
-llm -m ati "A cartoon parrot." -o condition_image A_parrot.png -o control_strength 0.9
+llm -m ati "A cartoon parrot." -o image A_parrot.png -o control_strength 0.9
 ```
 
 ### -o colors COLOR_LIST
@@ -351,23 +398,4 @@ Example:
 
 ```bash
 llm -m ati -o task COLOR -o colors '#ff8800,yellow,blue' 'A parrot.'
-```
-
-### -o reference_image PATH/TO/IMAGE.JPG
-
-The file system path to an image to use for guiding the colors style during a ```COLOR_GUIDED_GENERATION``` task.
-Image formats supported by Titan Image Generator models includ ```.jpg``` and ```.png```, however, the plugin will do
-its best to identify the image format and transcode the image into ```.png``` if necessary. Images must have a minimum
-image length of 256 pixels on either side and a maximum length of 1408 pixels on the longer side. The plugin will
-automatically shrink images that are too large to comply with the maximum supported image size.
-
-**Note**: the reference image feature is only supported in the Titan Image Generator V2 model and when using the 
-```COLOR_GUIDED_GENERATION``` task.
-
-Default: None
-
-Example:
-
-```bash
-llm -m ati -o task COLOR -o colors "yellow, blue" -o reference_image design_example.jpg
 ```
