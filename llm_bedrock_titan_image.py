@@ -120,11 +120,19 @@ MODEL_ID_TO_EXTRA_OPTIONS = {
 
 # Map model names to supported task types.
 MODEL_ID_TO_TASK_TYPES = {
-    'amazon.titan-image-generator-v1': ['TEXT_IMAGE'],
-    'amazon.titan-image-generator-v2:0': ['TEXT_IMAGE', 'COLOR_GUIDED_GENERATION', 'BACKGROUND_REMOVAL']
+    'amazon.titan-image-generator-v1': [
+        'TEXT_IMAGE',
+        # 'DETECT_GENERATED_CONTENT'
+    ],
+    'amazon.titan-image-generator-v2:0': [
+        'TEXT_IMAGE',
+        'COLOR_GUIDED_GENERATION',
+        'BACKGROUND_REMOVAL'
+    ]
 }
 
 TASKS = list({task for tasks in MODEL_ID_TO_TASK_TYPES.values() for task in tasks})
+TASKS_WITH_NO_PROMPT = ['BACKGROUND_REMOVAL', 'DETECT_GENERATED_CONTENT']
 DEFAULT_TASK = 'TEXT_IMAGE'
 
 
@@ -599,6 +607,23 @@ class BedrockTitanImage(llm.Model):
 
         return text_to_image_params
 
+    def generate_detect_generated_content_params(self):
+        """
+        Create a params dict (not just a sub-dict like in the other cases) for the Bedrock
+        detect_generated_content() API (preview).
+
+        See also: https://aws.amazon.com/de/blogs/aws/
+        amazon-titan-image-generator-and-watermark-detection-api-are-now-available-in-amazon-bedrock/
+
+        As of 2024-08-21, this feature (which is in preview) doesn't work yet.
+        """
+        with open(self.options.image, "rb") as image_file:
+            input_image = image_file.read()
+
+        return {
+            "imageContent": {"bytes": input_image}
+        }
+
     @staticmethod
     def parse_colors(colors):
         """
@@ -671,13 +696,19 @@ class BedrockTitanImage(llm.Model):
         :param prompt: A llm prompt object.
         :return: A dict of Bedrock Titan image parameters.
         """
+        # Verify that we support the given task.
+        task_type = prompt.options.task
+        if task_type not in MODEL_ID_TO_TASK_TYPES[self.model_id]:
+            raise ValueError(
+                f'The {task_type} task type is not supported with the {self.model_id} model.'
+            )
 
         # Build and validate the text prompt. Combine it with the system prompt if any.
         prompt_text = prompt.prompt
         if prompt.system:
             prompt_text = prompt.system + ' ' + prompt_text
 
-        if not prompt_text.strip() and not prompt.options.task == 'BACKGROUND_REMOVAL':
+        if not prompt_text.strip() and prompt.options.task not in TASKS_WITH_NO_PROMPT:
             raise ValueError('Prompt cannot be empty.')
         if len(prompt_text) > MAX_PROMPT_LENGTH:
             raise ValueError(
@@ -693,6 +724,7 @@ class BedrockTitanImage(llm.Model):
             )
 
         params = {
+            'taskType': task_type,
             'imageGenerationConfig': {
                 'width': size[0],
                 'height': size[1],
@@ -703,10 +735,10 @@ class BedrockTitanImage(llm.Model):
             }
         }
 
-        task_type = prompt.options.task
-        params['taskType'] = task_type
         if task_type == 'TEXT_IMAGE':
             params['textToImageParams'] = self.generate_text_image_params(prompt_text)
+        # elif task_type == 'DETECT_GENERATED_CONTENT':
+        #     params = self.generate_detect_generated_content_params()
         elif task_type == 'COLOR_GUIDED_GENERATION':
             params['colorGuidedGenerationParams'] = self.generate_color_guided_generation_params(prompt_text)
         elif task_type == 'BACKGROUND_REMOVAL':
@@ -803,6 +835,24 @@ class BedrockTitanImage(llm.Model):
 
         raise ValueError('AWS_DEFAULT_REGION not supported or accessible, no more regions left to try.')
 
+    def process_response_images(self, response_body, prompt):
+        """
+        Process all images contained in the given response body. Use the given prompt to generate
+        appropriate file names. yield processed file names while processing.
+        Remove them from the body after processing to avoid bulk when logging the rest.
+        """
+        for i, image_data in enumerate(response_body.get("images")):
+            image_bytes = base64.b64decode(image_data)
+            image_filename = self.prompt_to_filename(prompt)
+            with open(image_filename, "wb") as fp:
+                fp.write(image_bytes)
+
+            if prompt.options.auto_open:
+                self.open_file(image_filename)
+
+            response_body['images'][i] = f'<image data {i + 1}>'
+            yield image_filename
+
     def execute(self, prompt, stream, response, conversation):
         """
         Take the prompt and run it through our model. Return a response in streaming
@@ -831,6 +881,7 @@ class BedrockTitanImage(llm.Model):
 
             bedrock = boto3.client('bedrock-runtime', region_name=region)
             print_debug('Prompt body', params)
+
             try:
                 bedrock_response = bedrock.invoke_model(
                     modelId=self.model_id,
@@ -838,6 +889,7 @@ class BedrockTitanImage(llm.Model):
                     accept="application/json",
                     body=json.dumps(params)
                 )
+
                 self.successful_region = region
                 break
             except bedrock.exceptions.AccessDeniedException:
@@ -848,37 +900,27 @@ class BedrockTitanImage(llm.Model):
                 region, region_reason = self.region
 
         response_body = json.loads(bedrock_response.get("body").read())
-
-        # Process each image and remove them from the body, so we can log the rest without the
-        # bulky image data.
-
-        file_names = []
-        for i, image_data in enumerate(response_body.get("images")):
-            image_bytes = base64.b64decode(image_data)
-            image_filename = self.prompt_to_filename(prompt)
-            with open(image_filename, "wb") as fp:
-                fp.write(image_bytes)
-
-            if prompt.options.auto_open:
-                self.open_file(image_filename)
-
-            response_body['images'][i] = f'<image data {i + 1}>'
-
-            file_names.append(image_filename)
+        image_filenames = []
+        # removes images from response_body.
+        for image_filename in self.process_response_images(response_body, prompt):
+            image_filenames.append(image_filename)
             if stream:
                 yield f"Image written to: {image_filename}\n"
 
+        file_names = [self.prompt_to_filename(prompt)]
+
         # Log the rest of the response body in case there's more useful information in it.
         response.response_json = json.dumps(response_body)
+
         if not stream:
             if len(file_names) == 1:
                 yield (
-                    f'Image generated in the {region} Region ({region_reason}) ' +
-                    f'and written to: {file_names[0]}.\n'
+                        f'Image generated in the {region} Region ({region_reason}) ' +
+                        f'and written to: {file_names[0]}.\n'
                 )
             else:
                 yield (
-                    f'Images generated in the {region} region ({region_reason}.\n' +
-                    'Images written to:\n' +
-                    f'{"\n    ".join(file_names)}\n'
+                        f'Images generated in the {region} region ({region_reason}.\n' +
+                        'Images written to:\n' +
+                        f'{"\n    ".join(file_names)}\n'
                 )

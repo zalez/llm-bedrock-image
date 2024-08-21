@@ -140,15 +140,41 @@ llm -m ati -o task TEXT_IMAGE "A parrot."
 llm -m ati -o task TEXT_IMAGE "A parrot." -o image /path/to/condition_image.jpg
 ```
 
+### DETECT_GENERATED_CONTENT
+
+Amazon Titan Image Generator models contain an invisible watermark, by default. Using this task type allows identifying,
+if an image has been generated using one of these models. No prompt is required here, but an empty prompt is needed to
+avoid llm waiting interactively for the user to input a prompt.
+
+Example:
+
+```bash
+llm -m ati -o task detect -o image A_parrot.png ""
+```
+
 ### COLOR_GUIDED_GENERATION
 
-Only supported with the V2 model. Provide a list of hex color codes or CSS3 color names along with a text prompt
-to generate an image that follows the color palette. Also supports adding an image to guide the colory styling.
+(V2 only.)
+
+Provide a list of hex color codes or CSS3 color names along with a text prompt to generate an image that follows the
+color palette. Also supports adding an image to guide the colory styling.
 
 Examples:
 ```bash
 llm -m ati -o task COLOR -o colors '#ff8800,yellow,blue' 'A parrot.'
 llm -m ati -o task COLOR -o colors "yellow, blue" -o image design_example.jpg
+```
+
+### BACKGROUND_REMOVAL
+
+(V2 only.)
+
+Detect and remove the background of the given image. No prompt is required, however, llm will insiste on a prompt and
+wait for input if no prompt is supplied. Therefore, adding an empty prompt like "" is necessary.
+
+Example:
+```bash
+llm -m ati -o task background -o image 'A_parrot.png' ""
 ```
 
 ## Options
