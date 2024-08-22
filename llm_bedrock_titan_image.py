@@ -123,6 +123,7 @@ MODEL_ID_TO_TASK_TYPES = {
     'amazon.titan-image-generator-v1': [
         'TEXT_IMAGE',
         'INPAINTING',
+        'OUTPAINTING',
         # 'DETECT_GENERATED_CONTENT'
     ],
     'amazon.titan-image-generator-v2:0': [
@@ -130,6 +131,7 @@ MODEL_ID_TO_TASK_TYPES = {
         'COLOR_GUIDED_GENERATION',
         'BACKGROUND_REMOVAL',
         'INPAINTING',
+        'OUTPAINTING',
     ]
 }
 
@@ -259,6 +261,11 @@ class BedrockTitanImage(llm.Model):
             description='A mask image that defines which pixels to modify (RGB: 0, 0, 0) or not (RGB: 255, 255, 255).' +
             'To be used win INPAINTING or OUTPAINTING tasks as an alternative to mask prompts.',
             default=None
+        )
+        outpainting_mode: Optional[str] = Field(
+            description='Specifies whether to allow modification of the pixels inside the mask or not. Can be ' +
+                        'DEFAULT or PRECISE.',
+            default='DEFAULT'
         )
 
         @field_validator('region')
@@ -425,6 +432,14 @@ class BedrockTitanImage(llm.Model):
                 raise ValueError('image must be a valid file path.')
             return path
 
+        @field_validator('outpainting_mode')
+        def validate_outpainting_mode(cls, value):
+            if value is None:
+                return None
+            if str(value).upper() not in ['DEFAULT', 'PRECISE']:
+                raise ValueError('outpainting_mode must be one of [DEFAULT|PRECISE].')
+            return str(value).upper()
+
     def __init__(self, model_id):
         self.model_id = model_id
         self.model_name = MODEL_ID_TO_MODEL_NAME[model_id]
@@ -564,7 +579,7 @@ class BedrockTitanImage(llm.Model):
 
         :param image_path: An image file path.
         :return: The base64 encoded image file bytes of the (preprocessed) image to include inside a Titan Image
-                 Generator request parameter, as well as a (width, height) tuple of the result image size..
+                 Generator request parameter, as well as a (width, height) tuple of the result image size.
         """
         with open(image_path, "rb") as fp:
             img_bytes = fp.read()
@@ -640,22 +655,53 @@ class BedrockTitanImage(llm.Model):
 
         return text_to_image_params
 
-    def generate_detect_generated_content_params(self):
+    def generate_painting_params(self, prompt_text):
         """
-        Create a params dict (not just a sub-dict like in the other cases) for the Bedrock
-        detect_generated_content() API (preview).
-
-        See also: https://aws.amazon.com/de/blogs/aws/
-        amazon-titan-image-generator-and-watermark-detection-api-are-now-available-in-amazon-bedrock/
-
-        As of 2024-08-21, this feature (which is in preview) doesn't work yet.
+        Generate the shared portion of a Titan Image Generator parameter dict for INPAINTING and
+        OUTPAINTING tasks.
         """
-        with open(self.options.image, "rb") as image_file:
-            input_image = image_file.read()
+        if self.options.mask_image and self.options.mask_prompt:
+            raise ValueError('Only one of mask_image or mask_prompt can be provided for IN/OUTPAINTING tasks.')
+        if not self.options.mask_image and not self.options.mask_prompt:
+            raise ValueError('Either mask_image or mask_prompt must be provided for IN/OUTPAINTING tasks.')
+        if not self.options.image:
+            raise ValueError('An input image is required for IN/OUTPAINTING tasks.')
 
-        return {
-            "imageContent": {"bytes": input_image}
+        image_b64, image_size = self.load_and_preprocess_image(self.options.image)
+        painting_params = {
+            'image': image_b64,
         }
+
+        if prompt_text:  # prompt is optional, in this case, the model will fill in the mask.
+            painting_params['text'] = prompt_text
+
+        if self.options.negative_prompt:
+            painting_params['negativeText'] = self.options.negative_prompt
+
+        if self.options.mask_prompt:
+            painting_params['maskPrompt'] = self.options.mask_prompt
+
+        if self.options.mask_image:
+            mask_image_b64, mask_image_size = self.load_and_preprocess_image(self.options.mask_image)
+            if mask_image_size != image_size:
+                raise ValueError('The mask image must have the same size as the input image.')
+            painting_params['maskImage'] = mask_image_b64
+
+        return painting_params
+
+    def generate_inpainting_params(self, prompt_text):
+        """
+        Generate a Titan Image Generator parameter dict for INPAINTING tasks.
+        """
+        return self.generate_painting_params(prompt_text)
+
+    def generate_outpainting_params(self, prompt_text):
+        """
+        Generate a Titan Image Generator parameter dict for OUTPAINTING tasks.
+        """
+        out_painting_params = self.generate_painting_params(prompt_text)
+        out_painting_params['outPaintingMode'] = self.options.outpainting_mode
+        return out_painting_params
 
     @staticmethod
     def parse_colors(colors):
@@ -717,38 +763,23 @@ class BedrockTitanImage(llm.Model):
         else:
             ValueError('An input image is required for BACKGROUND_REMOVAL tasks.')
 
-    def generate_inpainting_params(self, prompt_text):
+    def generate_detect_generated_content_params(self):
         """
-        Generate a Titan Image Generator parameter dict for INPAINTING tasks.
-        """
-        if self.options.mask_image and self.options.mask_prompt:
-            raise ValueError('Only one of mask_image or mask_prompt can be provided for INPAINTING tasks.')
-        if not self.options.mask_image and not self.options.mask_prompt:
-            raise ValueError('Either mask_image or mask_prompt must be provided for INPAINTING tasks.')
-        if not self.options.image:
-            raise ValueError('An input image is required for INPAINTING tasks.')
+        Create a params dict (not just a sub-dict like in the other cases) for the Bedrock
+        detect_generated_content() API (preview).
 
-        image_b64, image_size = self.load_and_preprocess_image(self.options.image)
-        in_painting_params = {
-            'image': image_b64,
+        See also: https://aws.amazon.com/de/blogs/aws/
+        amazon-titan-image-generator-and-watermark-detection-api-are-now-available-in-amazon-bedrock/
+
+        As of 2024-08-21, this feature is in preview and requires a special preview SDK which is not generally
+        available yet. So we’ll leave this as is for now until it becomes more widely available.
+        """
+        with open(self.options.image, "rb") as image_file:
+            input_image = image_file.read()
+
+        return {
+            "imageContent": {"bytes": input_image}
         }
-
-        if prompt_text:  # prompt is optional, in this case, the model will fill in the mask.
-            in_painting_params['text'] = prompt_text
-
-        if self.options.negative_prompt:
-            in_painting_params['negativeText'] = self.options.negative_prompt
-
-        if self.options.mask_prompt:
-            in_painting_params['maskPrompt'] = self.options.mask_prompt
-
-        if self.options.mask_image:
-            mask_image_b64, mask_image_size = self.load_and_preprocess_image(self.options.mask_image)
-            if mask_image_size != image_size:
-                raise ValueError('The mask image must have the same size as the input image.')
-            in_painting_params['maskImage'] = mask_image_b64
-
-        return in_painting_params
 
     def prompt_to_titan_params(self, prompt):
         """
@@ -797,14 +828,16 @@ class BedrockTitanImage(llm.Model):
 
         if task_type == 'TEXT_IMAGE':
             params['textToImageParams'] = self.generate_text_image_params(prompt_text)
-        # elif task_type == 'DETECT_GENERATED_CONTENT':
-        #     params = self.generate_detect_generated_content_params()
+        elif task_type == 'INPAINTING':
+            params['inPaintingParams'] = self.generate_inpainting_params(prompt_text)
+        elif task_type == 'OUTPAINTING':
+            params['outPaintingParams'] = self.generate_outpainting_params(prompt_text)
         elif task_type == 'COLOR_GUIDED_GENERATION':
             params['colorGuidedGenerationParams'] = self.generate_color_guided_generation_params(prompt_text)
         elif task_type == 'BACKGROUND_REMOVAL':
             params['backgroundRemovalParams'] = self.generate_background_removal_params()
-        elif task_type == 'INPAINTING':
-            params['inPaintingParams'] = self.generate_inpainting_params(prompt_text)
+        # elif task_type == 'DETECT_GENERATED_CONTENT':
+        #     params = self.generate_detect_generated_content_params()
         else:
             raise ValueError(f'Invalid task type {task_type}.')
 
