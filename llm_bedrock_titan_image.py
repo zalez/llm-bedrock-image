@@ -122,17 +122,23 @@ MODEL_ID_TO_EXTRA_OPTIONS = {
 MODEL_ID_TO_TASK_TYPES = {
     'amazon.titan-image-generator-v1': [
         'TEXT_IMAGE',
+        'INPAINTING',
         # 'DETECT_GENERATED_CONTENT'
     ],
     'amazon.titan-image-generator-v2:0': [
         'TEXT_IMAGE',
         'COLOR_GUIDED_GENERATION',
-        'BACKGROUND_REMOVAL'
+        'BACKGROUND_REMOVAL',
+        'INPAINTING',
     ]
 }
 
 TASKS = list({task for tasks in MODEL_ID_TO_TASK_TYPES.values() for task in tasks})
-TASKS_WITH_NO_PROMPT = ['BACKGROUND_REMOVAL', 'DETECT_GENERATED_CONTENT']
+TASKS_WITH_NO_PROMPT_NEEDED = [
+    'BACKGROUND_REMOVAL',
+    'INPAINTING'
+    # 'DETECT_GENERATED_CONTENT'
+]
 DEFAULT_TASK = 'TEXT_IMAGE'
 
 
@@ -243,6 +249,15 @@ class BedrockTitanImage(llm.Model):
         )
         colors: Optional[str] = Field(
             description='A list of hex color codes for conditioning the colors used when generating the image.',
+            default=None
+        )
+        mask_prompt: Optional[str] = Field(
+            description='A text prompt that defines the mask to use for INPAINTING and OUTPAINTING tasks.',
+            default=None
+        )
+        mask_image: Optional[str] = Field(
+            description='A mask image that defines which pixels to modify (RGB: 0, 0, 0) or not (RGB: 255, 255, 255).' +
+            'To be used win INPAINTING or OUTPAINTING tasks as an alternative to mask prompts.',
             default=None
         )
 
@@ -393,6 +408,23 @@ class BedrockTitanImage(llm.Model):
                 raise ValueError('colors must be a string with comma-separated colors.')
             return value
 
+        @field_validator('mask_prompt')
+        def validate_mask_prompt(cls, value):
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                raise ValueError('mask_prompt must be a string.')
+            return value
+
+        @field_validator('mask_image')
+        def validate_mask_image(cls, value):
+            if value is None:
+                return None
+            path = os.path.expanduser(value)
+            if not os.path.exists(path):
+                raise ValueError('image must be a valid file path.')
+            return path
+
     def __init__(self, model_id):
         self.model_id = model_id
         self.model_name = MODEL_ID_TO_MODEL_NAME[model_id]
@@ -532,7 +564,7 @@ class BedrockTitanImage(llm.Model):
 
         :param image_path: An image file path.
         :return: The base64 encoded image file bytes of the (preprocessed) image to include inside a Titan Image
-                 Generator request parameter.
+                 Generator request parameter, as well as a (width, height) tuple of the result image size..
         """
         with open(image_path, "rb") as fp:
             img_bytes = fp.read()
@@ -577,12 +609,12 @@ class BedrockTitanImage(llm.Model):
                 img_format.lower() in SUPPORTED_INPUT_IMAGE_FORMATS and
                 img.size == (width, height)  # Original size, no resize needed
             ):
-                return base64.b64encode(img_bytes).decode('utf8')
+                return base64.b64encode(img_bytes).decode('utf8'), (width, height)
 
             # If not, re-export the image with the appropriate format
             with BytesIO() as buffer:
                 img.save(buffer, format='PNG')
-                return base64.b64encode(buffer.getvalue()).decode('utf8')
+                return base64.b64encode(buffer.getvalue()).decode('utf8'), (new_width, new_height)
 
     def generate_text_image_params(self, prompt_text):
         """
@@ -600,7 +632,8 @@ class BedrockTitanImage(llm.Model):
             if 'image' not in MODEL_ID_TO_EXTRA_OPTIONS[self.model_id]:
                 raise ValueError(f'Condition images are not supported with the {self.model_id} model.')
 
-            text_to_image_params['conditionImage'] = self.load_and_preprocess_image(self.options.image)
+            image_b64, _ = self.load_and_preprocess_image(self.options.image)
+            text_to_image_params['conditionImage'] = image_b64
 
             text_to_image_params['controlMode'] = self.options.control_mode
             text_to_image_params['controlStrength'] = self.options.control_strength
@@ -651,9 +684,6 @@ class BedrockTitanImage(llm.Model):
         Generate the COLOR_GUIDED_GENERATION specific parameter block out of the given options object.
         Assumes that any options are available from self.options.
         """
-        if 'COLOR_GUIDED_GENERATION' not in MODEL_ID_TO_TASK_TYPES[self.model_id]:
-            raise ValueError(f'The COLOR_GUIDED_GENERATION option is not supported with the {self.model_id} model.')
-
         if not self.options.colors:
             raise ValueError(
                 'A set of colors to guide the image generation process with is required for COLOR_GUIDED_GENERATION ' +
@@ -668,9 +698,8 @@ class BedrockTitanImage(llm.Model):
             color_guided_generation_params['negativeText'] = self.options.negative_prompt
 
         if self.options.image:
-            color_guided_generation_params['referenceImage'] = self.load_and_preprocess_image(
-                self.options.image
-            )
+            image_b64, _ = self.load_and_preprocess_image(self.options.image)
+            color_guided_generation_params['referenceImage'] = image_b64
 
         return color_guided_generation_params
 
@@ -680,15 +709,46 @@ class BedrockTitanImage(llm.Model):
         This task does not use any prompt text.
         Assumes that any options are available from self.options.
         """
-        if 'BACKGROUND_REMOVAL' not in MODEL_ID_TO_TASK_TYPES[self.model_id]:
-            raise ValueError(f'The BACKGROUND_REMOVAL task type is not supported with the {self.model_id} model.')
-
         if self.options.image:
+            image_b64, _ = self.load_and_preprocess_image(self.options.image)
             return {
-                'image': self.load_and_preprocess_image(self.options.image)
+                'image': image_b64
             }
         else:
             ValueError('An input image is required for BACKGROUND_REMOVAL tasks.')
+
+    def generate_inpainting_params(self, prompt_text):
+        """
+        Generate a Titan Image Generator parameter dict for INPAINTING tasks.
+        """
+        if self.options.mask_image and self.options.mask_prompt:
+            raise ValueError('Only one of mask_image or mask_prompt can be provided for INPAINTING tasks.')
+        if not self.options.mask_image and not self.options.mask_prompt:
+            raise ValueError('Either mask_image or mask_prompt must be provided for INPAINTING tasks.')
+        if not self.options.image:
+            raise ValueError('An input image is required for INPAINTING tasks.')
+
+        image_b64, image_size = self.load_and_preprocess_image(self.options.image)
+        in_painting_params = {
+            'image': image_b64,
+        }
+
+        if prompt_text:  # prompt is optional, in this case, the model will fill in the mask.
+            in_painting_params['text'] = prompt_text
+
+        if self.options.negative_prompt:
+            in_painting_params['negativeText'] = self.options.negative_prompt
+
+        if self.options.mask_prompt:
+            in_painting_params['maskPrompt'] = self.options.mask_prompt
+
+        if self.options.mask_image:
+            mask_image_b64, mask_image_size = self.load_and_preprocess_image(self.options.mask_image)
+            if mask_image_size != image_size:
+                raise ValueError('The mask image must have the same size as the input image.')
+            in_painting_params['maskImage'] = mask_image_b64
+
+        return in_painting_params
 
     def prompt_to_titan_params(self, prompt):
         """
@@ -708,7 +768,7 @@ class BedrockTitanImage(llm.Model):
         if prompt.system:
             prompt_text = prompt.system + ' ' + prompt_text
 
-        if not prompt_text.strip() and prompt.options.task not in TASKS_WITH_NO_PROMPT:
+        if not prompt_text.strip() and prompt.options.task not in TASKS_WITH_NO_PROMPT_NEEDED:
             raise ValueError('Prompt cannot be empty.')
         if len(prompt_text) > MAX_PROMPT_LENGTH:
             raise ValueError(
@@ -743,6 +803,8 @@ class BedrockTitanImage(llm.Model):
             params['colorGuidedGenerationParams'] = self.generate_color_guided_generation_params(prompt_text)
         elif task_type == 'BACKGROUND_REMOVAL':
             params['backgroundRemovalParams'] = self.generate_background_removal_params()
+        elif task_type == 'INPAINTING':
+            params['inPaintingParams'] = self.generate_inpainting_params(prompt_text)
         else:
             raise ValueError(f'Invalid task type {task_type}.')
 
