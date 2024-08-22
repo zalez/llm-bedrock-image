@@ -101,6 +101,8 @@ MIN_INPUT_IMAGE_LENGTH = 256
 MAX_INPUT_IMAGE_LENGTH = 1408
 SUPPORTED_INPUT_IMAGE_FORMATS = ['png', 'jpg', 'jpeg']
 
+MAX_INPUT_IMAGES_FOR_VARIATION = 5
+
 # Pricing information
 
 # Taken from looking at: https://aws.amazon.com/bedrock/pricing/
@@ -240,6 +242,10 @@ class BedrockTitanImage(llm.Model):
         )
         image: Optional[str] = Field(
             description='File system path to an input image used for certain task types.',
+            default=None
+        )
+        images: Optional[str] = Field(
+            description='1 - 5 comma-separated file system paths to input image used for certain task types.',
             default=None
         )
         resize_image: Optional[Union[str, bool]] = Field(
@@ -389,6 +395,16 @@ class BedrockTitanImage(llm.Model):
             if not os.path.exists(path):
                 raise ValueError('image must be a valid file path.')
             return path
+
+        @field_validator('images')
+        def validate_images(cls, value):
+            if value is None:
+                return None
+            for i in value.split(','):
+                path = os.path.expanduser(i.strip())
+                if not os.path.exists(path):
+                    raise ValueError(f'Image: {path} is not a valid file path.')
+            return value
 
         @field_validator('resize_image')
         def validate_resize_image(cls, value):
@@ -729,13 +745,33 @@ class BedrockTitanImage(llm.Model):
         Generate the IMAGE_VARIATION specific parameter block out of the given prompt text, using any options available
         from the object’s options object.
         """
-        if not self.options.image:
-            raise ValueError(f'IMAGE_VARIATION_TASKS require at least one -o image option.')
+        if not self.options.image and not self.options.images:
+            raise ValueError(f'IMAGE_VARIATION_TASKS require at least one -o image or -o images option.')
 
-        image_b64, _ = self.load_and_preprocess_image(self.options.image)
+        image_paths = []
+        if self.options.image:
+            image_paths.append(os.path.expanduser(self.options.image))
+
+        if self.options.images:
+            for i in self.options.images.split(','):
+                image_paths.append(os.path.expanduser(i))
+
+        if not image_paths:
+            raise ValueError('The IMAGE_VARIATION task requires a minimum of 1 input image.')
+
+        if len(image_paths) > MAX_INPUT_IMAGES_FOR_VARIATION:
+            raise ValueError(
+                f'The IMAGE_VARIATION task only supporta a maximum of {MAX_INPUT_IMAGES_FOR_VARIATION} images.'
+            )
+
+        images = []
+        for i in image_paths:
+            image_b64, _ = self.load_and_preprocess_image(i)
+            images.append(image_b64)
+
         image_variation_params = {
             'text': prompt_text,
-            'images': [image_b64],
+            'images': images,
             'similarityStrength': self.options.similarity_strength,
         }
         if self.options.negative_prompt:

@@ -177,14 +177,16 @@ llm -m ati -o task OUTPAINTING -o mask_image vacation_mask.png -o image vacation
 
 ### IMAGE_VARIATION
 
-Image variation allow you to create variations of your original image based on the parameter values.
+Image variation allow you to create variations of your original image(s) based on the parameter values.
 
-Describe in the prompt what to keep and what to modify in the image(s).
+Describe in the prompt what to keep and what to modify in the image(s). Either supply one image using the
+```-o image``` option or multiple, comma-separated image paths using the ```-o images``` option.
 
 Examples:
 
 ```bash
-llm -m ati -o task variation -o image photo.jpeg 'Make it look more modern.'
+llm -m ati -o task variation -o image photo.jpg 'Make it look more modern.'
+llm -m ati -o task variation -o images photo_1.jpg,photo_2.jpg 'Cartoon style.'
 ```
 
 ### COLOR_GUIDED_GENERATION
@@ -372,6 +374,7 @@ The file system path to an image to use for guiding certain aspects of certain t
 
 * For ```TEXT_IMAGE```, the image is used to guide the overall image generation process.
 * For ```INPAINTING``` and ```OUTPAINTING```, the image to modify.
+* For ```IMAGE_VARIATION```, the image to create variation(s) for.
 * For ```COLOR_GUIDED_GENERATION```, the image supplies a color theme for the model to use.
 * For ```BACKGROUND REMOVAL```, this is the image to remove background from.
 
@@ -393,7 +396,7 @@ llm -m ati -o task BACKGROUND -o image A_parrot.jpg ""  # NOTE: An empty prompt 
 
 ### -o resize_image [true|false|on|off|0|1]
 
-Resize the image if it doesn't conform to the model's supported image sizes.
+Resize the image(s) if it/they doesn't/don't conform to the model's supported image sizes.
 
 Default: True
 Example:
@@ -482,6 +485,19 @@ Available with: ```INPAINTING```, ```OUTPAINTING```.
 A mask image that defines the area to change for ```INPAINTING``` tasks or the area to keep for ```OUTPAINTING```
 tasks. Mask images can only have two colors: Black (RGB: 0, 0, 0) for the mask and White (RGB: 255, 255, 255) for
 everything else.
+
+### -o images
+
+Available with: ```IMAGE_VARIATION```.
+
+Works like ```-o image```, only that it allows up to 5 images, with comma-separated paths.
+
+Default: None
+
+Example:
+```bash
+llm -m ati -o task variation -o images A_parrot.png,Another_parrot.png 'Cartoon style.'
+```
 
 ### -o colors COLOR_LIST
 
