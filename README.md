@@ -175,6 +175,18 @@ llm -m ati -o task OUTPAINTING -o mask_prompt 'people' -o image vacation.jpeg 'i
 llm -m ati -o task OUTPAINTING -o mask_image vacation_mask.png -o image vacation.jpeg 'in a jungle.'
 ```
 
+### IMAGE_VARIATION
+
+Image variation allow you to create variations of your original image based on the parameter values.
+
+Describe in the prompt what to keep and what to modify in the image(s).
+
+Examples:
+
+```bash
+llm -m ati -o task variation -o image photo.jpeg 'Make it look more modern.'
+```
+
 ### COLOR_GUIDED_GENERATION
 
 (V2 only.)

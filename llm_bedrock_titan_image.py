@@ -90,6 +90,10 @@ MIN_CONTROL_STRENGTH = 0.0
 MAX_CONTROL_STRENGTH = 1.0
 DEFAULT_CONTROL_STRENGTH = 0.7
 
+MIN_SIMILARITY_STRENGTH = 0.2
+MAX_SIMILARITY_STRENGTH = 1.0
+DEFAULT_SIMILARITY_STRENGTH = 0.7
+
 MIN_COLORS = 1
 MAX_COLORS = 10
 
@@ -124,14 +128,16 @@ MODEL_ID_TO_TASK_TYPES = {
         'TEXT_IMAGE',
         'INPAINTING',
         'OUTPAINTING',
+        'IMAGE_VARIATION',
         # 'DETECT_GENERATED_CONTENT'
     ],
     'amazon.titan-image-generator-v2:0': [
         'TEXT_IMAGE',
-        'COLOR_GUIDED_GENERATION',
-        'BACKGROUND_REMOVAL',
         'INPAINTING',
         'OUTPAINTING',
+        'IMAGE_VARIATION',
+        'COLOR_GUIDED_GENERATION',
+        'BACKGROUND_REMOVAL',
     ]
 }
 
@@ -240,6 +246,25 @@ class BedrockTitanImage(llm.Model):
             description="Automatically resize the image if it doesn't conform to supported size constraints.",
             default=True
         )
+        mask_prompt: Optional[str] = Field(
+            description='A text prompt that defines the mask to use for INPAINTING and OUTPAINTING tasks.',
+            default=None
+        )
+        mask_image: Optional[str] = Field(
+            description='A mask image that defines which pixels to modify (RGB: 0, 0, 0) or not (RGB: 255, 255, 255).' +
+                        'To be used win INPAINTING or OUTPAINTING tasks as an alternative to mask prompts.',
+            default=None
+        )
+        outpainting_mode: Optional[str] = Field(
+            description='Specifies whether to allow modification of the pixels inside the mask or not. Can be ' +
+                        'DEFAULT or PRECISE.',
+            default='DEFAULT'
+        )
+        similarity_strength: Optional[Union[int, float]] = Field(
+            description='Specifies how similar the generated image should be to the input image(s) for ' +
+                        'IMAGE_VARIATION tasks. Use a lower value to introduce more randomness in the generation.',
+            default=DEFAULT_SIMILARITY_STRENGTH
+        )
         control_mode: Optional[str] = Field(
             description='What type of image conditioning to use. Can be CANNY_EDGE or or SEGMENTATION.',
             default='CANNY_EDGE'
@@ -252,20 +277,6 @@ class BedrockTitanImage(llm.Model):
         colors: Optional[str] = Field(
             description='A list of hex color codes for conditioning the colors used when generating the image.',
             default=None
-        )
-        mask_prompt: Optional[str] = Field(
-            description='A text prompt that defines the mask to use for INPAINTING and OUTPAINTING tasks.',
-            default=None
-        )
-        mask_image: Optional[str] = Field(
-            description='A mask image that defines which pixels to modify (RGB: 0, 0, 0) or not (RGB: 255, 255, 255).' +
-            'To be used win INPAINTING or OUTPAINTING tasks as an alternative to mask prompts.',
-            default=None
-        )
-        outpainting_mode: Optional[str] = Field(
-            description='Specifies whether to allow modification of the pixels inside the mask or not. Can be ' +
-                        'DEFAULT or PRECISE.',
-            default='DEFAULT'
         )
 
         @field_validator('region')
@@ -387,6 +398,31 @@ class BedrockTitanImage(llm.Model):
                 raise ValueError('resize_image must be one of true, false, on, off, 0, 1.')
             return str(value).lower() in ['true', 'on', '1']
 
+        @field_validator('mask_prompt')
+        def validate_mask_prompt(cls, value):
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                raise ValueError('mask_prompt must be a string.')
+            return value
+
+        @field_validator('mask_image')
+        def validate_mask_image(cls, value):
+            if value is None:
+                return None
+            path = os.path.expanduser(value)
+            if not os.path.exists(path):
+                raise ValueError('image must be a valid file path.')
+            return path
+
+        @field_validator('outpainting_mode')
+        def validate_outpainting_mode(cls, value):
+            if value is None:
+                return None
+            if str(value).upper() not in ['DEFAULT', 'PRECISE']:
+                raise ValueError('outpainting_mode must be one of [DEFAULT|PRECISE].')
+            return str(value).upper()
+
         @field_validator('control_mode')
         def validate_control_mode(cls, value):
             if value is None:
@@ -415,30 +451,15 @@ class BedrockTitanImage(llm.Model):
                 raise ValueError('colors must be a string with comma-separated colors.')
             return value
 
-        @field_validator('mask_prompt')
-        def validate_mask_prompt(cls, value):
-            if value is None:
-                return None
-            if not isinstance(value, str):
-                raise ValueError('mask_prompt must be a string.')
-            return value
-
-        @field_validator('mask_image')
-        def validate_mask_image(cls, value):
-            if value is None:
-                return None
-            path = os.path.expanduser(value)
-            if not os.path.exists(path):
-                raise ValueError('image must be a valid file path.')
-            return path
-
-        @field_validator('outpainting_mode')
-        def validate_outpainting_mode(cls, value):
-            if value is None:
-                return None
-            if str(value).upper() not in ['DEFAULT', 'PRECISE']:
-                raise ValueError('outpainting_mode must be one of [DEFAULT|PRECISE].')
-            return str(value).upper()
+        @field_validator('similarity_strength')
+        def validate_similarity_strength(cls, value):
+            if not isinstance(value, (int, float)):
+                raise ValueError('similarity_strength must be an integer or float.')
+            if value < MIN_SIMILARITY_STRENGTH or value > MAX_SIMILARITY_STRENGTH:
+                raise ValueError(
+                    f'control_strength must be between {MIN_SIMILARITY_STRENGTH} and {MAX_SIMILARITY_STRENGTH}.'
+                )
+            return float(value)
 
     def __init__(self, model_id):
         self.model_id = model_id
@@ -703,6 +724,25 @@ class BedrockTitanImage(llm.Model):
         out_painting_params['outPaintingMode'] = self.options.outpainting_mode
         return out_painting_params
 
+    def generate_image_variation_params(self, prompt_text):
+        """
+        Generate the IMAGE_VARIATION specific parameter block out of the given prompt text, using any options available
+        from the object’s options object.
+        """
+        if not self.options.image:
+            raise ValueError(f'IMAGE_VARIATION_TASKS require at least one -o image option.')
+
+        image_b64, _ = self.load_and_preprocess_image(self.options.image)
+        image_variation_params = {
+            'text': prompt_text,
+            'images': [image_b64],
+            'similarityStrength': self.options.similarity_strength,
+        }
+        if self.options.negative_prompt:
+            image_variation_params['negativeText'] = self.options.negative_prompt
+
+        return image_variation_params
+
     @staticmethod
     def parse_colors(colors):
         """
@@ -832,6 +872,8 @@ class BedrockTitanImage(llm.Model):
             params['inPaintingParams'] = self.generate_inpainting_params(prompt_text)
         elif task_type == 'OUTPAINTING':
             params['outPaintingParams'] = self.generate_outpainting_params(prompt_text)
+        elif task_type == 'IMAGE_VARIATION':
+            params['imageVariationParams'] = self.generate_image_variation_params(prompt_text)
         elif task_type == 'COLOR_GUIDED_GENERATION':
             params['colorGuidedGenerationParams'] = self.generate_color_guided_generation_params(prompt_text)
         elif task_type == 'BACKGROUND_REMOVAL':
