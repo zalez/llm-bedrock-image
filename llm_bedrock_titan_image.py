@@ -1098,7 +1098,7 @@ class BedrockTitanImage(llm.Model):
 
         # Save any returned mask image as well and remove it for logging.
         mask_image_filename = None
-        if 'maskImage' in response_body:
+        if response_body.get('maskImage'):
             mask_image_bytes = base64.b64decode(response_body['maskImage'])
             mask_image_filename = self.prompt_text_to_filename(prompt.prompt + ' mask')
             with open(mask_image_filename, "wb") as fp:
