@@ -259,7 +259,7 @@ Example:
 llm -m ati "A parrot." -o auto_region off
 ```
 
-### -o task [TEXT_IMAGE|INPAINTING|OUTPAINTING|COLOR_GUIDED_GENERATION|BACKGROUND_REMOVAL]
+### -o task [TEXT_IMAGE|INPAINTING|OUTPAINTING|IMAGE_VARIATION|COLOR_GUIDED_GENERATION|BACKGROUND_REMOVAL]
 
 The task type to execute. See *Task types* above for available task types and what they do.
 Any upper/lower/mixed case string is allowed that matches exactly one of the available task types unambiguously.
@@ -354,11 +354,11 @@ Example:
 llm -m ati "A dolphin." -o seed 42
 ```
 
-### -o quality [standard|premium]
+### -o quality [STANDARD|PREMIUM]
 
-The quality to generate image with. Use "standard" for drafting and "premium" to get finder details.
+The quality to generate image with. Case-insensitive. Use "standard" for drafting and "premium" to get finer details.
 
-Default: ```standard```
+Default: ```STANDARD```
 
 Example:
 ```bash
@@ -446,7 +446,7 @@ Example:
 llm -m ati "A cartoon parrot." -o image A_parrot.png -o control_mode SEGMENTATION
 ```
 
-### -o control_strength [FLOAT|INT]
+### -o control_strength FLOAT|INT
 
 Available with: ```TEXT_IMAGE```.
 
