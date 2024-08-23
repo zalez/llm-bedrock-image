@@ -120,7 +120,7 @@ MODEL_ID_TO_MODEL_NAME = {
 MODEL_ID_TO_EXTRA_OPTIONS = {
     'amazon.titan-image-generator-v1': [],
     'amazon.titan-image-generator-v2:0': [
-        'image', 'control_mode', 'control_strength'
+        'control_mode', 'control_strength'
     ]
 }
 
@@ -260,6 +260,10 @@ class BedrockTitanImage(llm.Model):
             description='A mask image that defines which pixels to modify (RGB: 0, 0, 0) or not (RGB: 255, 255, 255).' +
                         'To be used win INPAINTING or OUTPAINTING tasks as an alternative to mask prompts.',
             default=None
+        )
+        return_mask: Optional[Union[str, bool]] = Field(
+            description='Return the mask that was used during an INPAINTING or OUTPAINTING task.',
+            default=False
         )
         outpainting_mode: Optional[str] = Field(
             description='Specifies whether to allow modification of the pixels inside the mask or not. Can be ' +
@@ -430,6 +434,14 @@ class BedrockTitanImage(llm.Model):
             if not os.path.exists(path):
                 raise ValueError('image must be a valid file path.')
             return path
+
+        @field_validator('return_mask')
+        def validate_return_mask(cls, value):
+            if value is None:
+                return False  # Default
+            if str(value).lower() not in ['true', 'false', 'on', 'off', '0', '1']:
+                raise ValueError('return_mask must be one of true, false, on, off, 0, 1.')
+            return str(value).lower() in ['true', 'on', '1']
 
         @field_validator('outpainting_mode')
         def validate_outpainting_mode(cls, value):
@@ -724,6 +736,9 @@ class BedrockTitanImage(llm.Model):
                 raise ValueError('The mask image must have the same size as the input image.')
             painting_params['maskImage'] = mask_image_b64
 
+        if self.options.return_mask:
+            painting_params['returnMask'] = self.options.return_mask
+
         return painting_params
 
     def generate_inpainting_params(self, prompt_text):
@@ -761,7 +776,7 @@ class BedrockTitanImage(llm.Model):
 
         if len(image_paths) > MAX_INPUT_IMAGES_FOR_VARIATION:
             raise ValueError(
-                f'The IMAGE_VARIATION task only supporta a maximum of {MAX_INPUT_IMAGES_FOR_VARIATION} images.'
+                f'The IMAGE_VARIATION task only supports a maximum of {MAX_INPUT_IMAGES_FOR_VARIATION} images.'
             )
 
         images = []
@@ -924,16 +939,16 @@ class BedrockTitanImage(llm.Model):
         return params
 
     @staticmethod
-    def prompt_to_filename(prompt):
+    def prompt_text_to_filename(text):
         """
-        Generate a file name out of the given prompt object by replacing any non-alphanumeric
+        Generate a file name out of the given prompt text by replacing any non-alphanumeric
         character including spaces with underscore, then eliminating multiple underscores.
-        :param prompt: A llm prompt object.
+        :param text: A prompt text.
         :return: A file name string.
         """
         base = ""
         ext = ".png"
-        for c in prompt.prompt:
+        for c in text:
             if c.isalnum():
                 base += c
             else:
@@ -1016,7 +1031,7 @@ class BedrockTitanImage(llm.Model):
         """
         for i, image_data in enumerate(response_body.get("images")):
             image_bytes = base64.b64decode(image_data)
-            image_filename = self.prompt_to_filename(prompt)
+            image_filename = self.prompt_text_to_filename(prompt.prompt)
             with open(image_filename, "wb") as fp:
                 fp.write(image_bytes)
 
@@ -1073,27 +1088,40 @@ class BedrockTitanImage(llm.Model):
                 region, region_reason = self.region
 
         response_body = json.loads(bedrock_response.get("body").read())
+
+        # Process images in the response body. This will also remove them to make the burden lighter for logging.
         image_filenames = []
-        # removes images from response_body.
         for image_filename in self.process_response_images(response_body, prompt):
             image_filenames.append(image_filename)
             if stream:
                 yield f"Image written to: {image_filename}\n"
 
-        file_names = [self.prompt_to_filename(prompt)]
+        # Save any returned mask image as well and remove it for logging.
+        mask_image_filename = None
+        if 'maskImage' in response_body:
+            mask_image_bytes = base64.b64decode(response_body['maskImage'])
+            mask_image_filename = self.prompt_text_to_filename(prompt.prompt + ' mask')
+            with open(mask_image_filename, "wb") as fp:
+                fp.write(mask_image_bytes)
+            response_body['maskImage'] = '<mask image>'
+
+            if stream:
+                yield f'Mask image written to: {mask_image_filename}\n'
 
         # Log the rest of the response body in case there's more useful information in it.
         response.response_json = json.dumps(response_body)
 
         if not stream:
-            if len(file_names) == 1:
+            if len(image_filenames) == 1:
                 yield (
                         f'Image generated in the {region} Region ({region_reason}) ' +
-                        f'and written to: {file_names[0]}.\n'
+                        f'and written to: {image_filenames[0]}.\n'
                 )
             else:
                 yield (
                         f'Images generated in the {region} region ({region_reason}.\n' +
                         'Images written to:\n' +
-                        f'{"\n    ".join(file_names)}\n'
+                        f'{"\n    ".join(image_filenames)}\n'
                 )
+            if mask_image_filename:
+                yield f'Mask image written to: {mask_image_filename}\n'

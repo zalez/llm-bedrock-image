@@ -3,7 +3,7 @@
 [![PyPI](https://img.shields.io/pypi/v/llm-bedrock-titan-image.svg)](https://pypi.org/project/llm-bedrock-titan-image/)
 [![License](https://img.shields.io/badge/license-Apache%202.0-blue.svg)](https://github.com/zalez/llm-bedrock-titan-image/blob/main/LICENSE)
 
-Plugin for Simon Willison’s [LLM](https://llm.datasette.io) CLI utility, adding support for Amazon Titan Image Generator
+A plugin for Simon Willison’s [LLM](https://llm.datasette.io) CLI utility, adding support for Amazon Titan Image Generator 
 G1 models V1 and V2 on Amazon Bedrock.
 
 ## Disclaimer
@@ -485,6 +485,25 @@ Available with: ```INPAINTING```, ```OUTPAINTING```.
 A mask image that defines the area to change for ```INPAINTING``` tasks or the area to keep for ```OUTPAINTING```
 tasks. Mask images can only have two colors: Black (RGB: 0, 0, 0) for the mask and White (RGB: 255, 255, 255) for
 everything else.
+
+Example:
+
+```bash
+llm -m ati -o task INPAINTING -o image Vacation.jpg -o mask_image Vacation_clouds_mask.png ""
+```
+
+### -o return_mask
+
+Available with: ```INPAINTING```, ```OUTPAINTING```.
+
+Also return the mask image that was used during an ```INPAINTING``` or ```OUTPAINTING``` task.
+Useful for re-using the mask either with the model or an image editor.
+
+Example:
+
+```bash
+llm -m ati -o task OUTPAINTING -o mask_prompt 'A parrot' -o image A_parrot.png -o return_mask true 'in a jungle.'
+```
 
 ### -o images
 
