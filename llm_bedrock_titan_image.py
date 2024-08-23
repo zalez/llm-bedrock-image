@@ -39,9 +39,6 @@ DEBUG = os.environ.get('DEBUG', 'false').lower() in ['true', '1']
 
 # Model options and defaults
 
-TASKS = ['TEXT_IMAGE', 'COLOR_GUIDED_GENERATION']
-DEFAULT_TASK = 'TEXT_IMAGE'
-
 MAX_PROMPT_LENGTH = 512
 
 MIN_NUMBER_OF_IMAGES = 1
@@ -93,12 +90,18 @@ MIN_CONTROL_STRENGTH = 0.0
 MAX_CONTROL_STRENGTH = 1.0
 DEFAULT_CONTROL_STRENGTH = 0.7
 
+MIN_SIMILARITY_STRENGTH = 0.2
+MAX_SIMILARITY_STRENGTH = 1.0
+DEFAULT_SIMILARITY_STRENGTH = 0.7
+
 MIN_COLORS = 1
 MAX_COLORS = 10
 
 MIN_INPUT_IMAGE_LENGTH = 256
 MAX_INPUT_IMAGE_LENGTH = 1408
 SUPPORTED_INPUT_IMAGE_FORMATS = ['png', 'jpg', 'jpeg']
+
+MAX_INPUT_IMAGES_FOR_VARIATION = 5
 
 # Pricing information
 
@@ -117,15 +120,36 @@ MODEL_ID_TO_MODEL_NAME = {
 MODEL_ID_TO_EXTRA_OPTIONS = {
     'amazon.titan-image-generator-v1': [],
     'amazon.titan-image-generator-v2:0': [
-        'condition_image', 'control_mode', 'control_strength'
+        'control_mode', 'control_strength'
     ]
 }
 
 # Map model names to supported task types.
 MODEL_ID_TO_TASK_TYPES = {
-    'amazon.titan-image-generator-v1': ['TEXT_IMAGE'],
-    'amazon.titan-image-generator-v2:0': ['TEXT_IMAGE', 'COLOR_GUIDED_GENERATION']
+    'amazon.titan-image-generator-v1': [
+        'TEXT_IMAGE',
+        'INPAINTING',
+        'OUTPAINTING',
+        'IMAGE_VARIATION',
+        # 'DETECT_GENERATED_CONTENT'
+    ],
+    'amazon.titan-image-generator-v2:0': [
+        'TEXT_IMAGE',
+        'INPAINTING',
+        'OUTPAINTING',
+        'IMAGE_VARIATION',
+        'COLOR_GUIDED_GENERATION',
+        'BACKGROUND_REMOVAL',
+    ]
 }
+
+TASKS = list({task for tasks in MODEL_ID_TO_TASK_TYPES.values() for task in tasks})
+TASKS_WITH_NO_PROMPT_NEEDED = [
+    'BACKGROUND_REMOVAL',
+    'INPAINTING'
+    # 'DETECT_GENERATED_CONTENT'
+]
+DEFAULT_TASK = 'TEXT_IMAGE'
 
 
 # Functions
@@ -216,9 +240,40 @@ class BedrockTitanImage(llm.Model):
             description='The quality setting to use. Can be ’standard’ or ’premium’.',
             default='standard'
         )
-        condition_image: Optional[str] = Field(
-            description='File system path to a condition image to guide the image generation process with.',
+        image: Optional[str] = Field(
+            description='File system path to an input image used for certain task types.',
             default=None
+        )
+        images: Optional[str] = Field(
+            description='1 - 5 comma-separated file system paths to input image used for certain task types.',
+            default=None
+        )
+        resize_image: Optional[Union[str, bool]] = Field(
+            description="Automatically resize the image if it doesn't conform to supported size constraints.",
+            default=True
+        )
+        mask_prompt: Optional[str] = Field(
+            description='A text prompt that defines the mask to use for INPAINTING and OUTPAINTING tasks.',
+            default=None
+        )
+        mask_image: Optional[str] = Field(
+            description='A mask image that defines which pixels to modify (RGB: 0, 0, 0) or not (RGB: 255, 255, 255).' +
+                        'To be used win INPAINTING or OUTPAINTING tasks as an alternative to mask prompts.',
+            default=None
+        )
+        return_mask: Optional[Union[str, bool]] = Field(
+            description='Return the mask that was used during an INPAINTING or OUTPAINTING task.',
+            default=False
+        )
+        outpainting_mode: Optional[str] = Field(
+            description='Specifies whether to allow modification of the pixels inside the mask or not. Can be ' +
+                        'DEFAULT or PRECISE.',
+            default='DEFAULT'
+        )
+        similarity_strength: Optional[Union[int, float]] = Field(
+            description='Specifies how similar the generated image should be to the input image(s) for ' +
+                        'IMAGE_VARIATION tasks. Use a lower value to introduce more randomness in the generation.',
+            default=DEFAULT_SIMILARITY_STRENGTH
         )
         control_mode: Optional[str] = Field(
             description='What type of image conditioning to use. Can be CANNY_EDGE or or SEGMENTATION.',
@@ -231,11 +286,6 @@ class BedrockTitanImage(llm.Model):
         )
         colors: Optional[str] = Field(
             description='A list of hex color codes for conditioning the colors used when generating the image.',
-            default=None
-        )
-        reference_image: Optional[str] = Field(
-            description='File system path to a color reference image for guiding the colors in the image generation ' +
-            'process with.',
             default=None
         )
 
@@ -260,7 +310,7 @@ class BedrockTitanImage(llm.Model):
         @field_validator('auto_region')
         def validate_auto_region(cls, value):
             if value is None:
-                return None
+                return True  # Default
             if str(value).lower() not in ['true', 'false', 'on', 'off', '0', '1']:
                 raise ValueError('auto_region must be one of true, false, on, off, 0, 1.')
             return str(value).lower() in ['true', 'on', '1']
@@ -268,7 +318,7 @@ class BedrockTitanImage(llm.Model):
         @field_validator('auto_open')
         def validate_auto_open(cls, value):
             if value is None:
-                return None
+                return True  # Default
             if str(value).lower() not in ['true', 'false', 'on', 'off', '0', '1']:
                 raise ValueError('auto_open must be one of true, false, on, off, 0, 1.')
             return str(value).lower() in ['true', 'on', '1']
@@ -341,14 +391,65 @@ class BedrockTitanImage(llm.Model):
                 raise ValueError('quality must be one of [standard|premium].')
             return str(value).lower()
 
-        @field_validator('condition_image')
-        def validate_condition_image(cls, value):
+        @field_validator('image')
+        def validate_image(cls, value):
             if value is None:
                 return None
             path = os.path.expanduser(value)
             if not os.path.exists(path):
-                raise ValueError('condition_image must be a valid file path.')
+                raise ValueError('image must be a valid file path.')
             return path
+
+        @field_validator('images')
+        def validate_images(cls, value):
+            if value is None:
+                return None
+            for i in value.split(','):
+                path = os.path.expanduser(i.strip())
+                if not os.path.exists(path):
+                    raise ValueError(f'Image: {path} is not a valid file path.')
+            return value
+
+        @field_validator('resize_image')
+        def validate_resize_image(cls, value):
+            if value is None:
+                return True  # Default
+            if str(value).lower() not in ['true', 'false', 'on', 'off', '0', '1']:
+                raise ValueError('resize_image must be one of true, false, on, off, 0, 1.')
+            return str(value).lower() in ['true', 'on', '1']
+
+        @field_validator('mask_prompt')
+        def validate_mask_prompt(cls, value):
+            if value is None:
+                return None
+            if not isinstance(value, str):
+                raise ValueError('mask_prompt must be a string.')
+            return value
+
+        @field_validator('mask_image')
+        def validate_mask_image(cls, value):
+            if value is None:
+                return None
+            path = os.path.expanduser(value)
+            if not os.path.exists(path):
+                raise ValueError('image must be a valid file path.')
+            return path
+
+        @field_validator('return_mask')
+        def validate_return_mask(cls, value):
+            if value is None:
+                return False  # Default
+            if str(value).lower() not in ['true', 'false', 'on', 'off', '0', '1']:
+                raise ValueError('return_mask must be one of true, false, on, off, 0, 1.')
+            return str(value).lower() in ['true', 'on', '1']
+
+        @field_validator('outpainting_mode')
+        def validate_outpainting_mode(cls, value):
+            if value is None:
+                return None
+            if str(value).upper() not in ['DEFAULT', 'PRECISE']:
+                raise ValueError('outpainting_mode must be one of [DEFAULT|PRECISE].')
+            return str(value).upper()
 
         @field_validator('control_mode')
         def validate_control_mode(cls, value):
@@ -378,14 +479,15 @@ class BedrockTitanImage(llm.Model):
                 raise ValueError('colors must be a string with comma-separated colors.')
             return value
 
-        @field_validator('reference_image')
-        def validate_reference_image(cls, value):
-            if value is None:
-                return None
-            path = os.path.expanduser(value)
-            if not os.path.exists(path):
-                raise ValueError('reference_image must be a valid file path.')
-            return path
+        @field_validator('similarity_strength')
+        def validate_similarity_strength(cls, value):
+            if not isinstance(value, (int, float)):
+                raise ValueError('similarity_strength must be an integer or float.')
+            if value < MIN_SIMILARITY_STRENGTH or value > MAX_SIMILARITY_STRENGTH:
+                raise ValueError(
+                    f'control_strength must be between {MIN_SIMILARITY_STRENGTH} and {MAX_SIMILARITY_STRENGTH}.'
+                )
+            return float(value)
 
     def __init__(self, model_id):
         self.model_id = model_id
@@ -517,8 +619,7 @@ class BedrockTitanImage(llm.Model):
             )
         )
 
-    @staticmethod
-    def load_and_preprocess_image(image_path):
+    def load_and_preprocess_image(self, image_path):
         """
         Load and pre-process the image from the given image path for use with Titan Image Generator models.
         * Resize if needed.
@@ -527,7 +628,7 @@ class BedrockTitanImage(llm.Model):
 
         :param image_path: An image file path.
         :return: The base64 encoded image file bytes of the (preprocessed) image to include inside a Titan Image
-                 Generator request parameter.
+                 Generator request parameter, as well as a (width, height) tuple of the result image size.
         """
         with open(image_path, "rb") as fp:
             img_bytes = fp.read()
@@ -535,26 +636,49 @@ class BedrockTitanImage(llm.Model):
         with Image.open(BytesIO(img_bytes)) as img:
             img_format = img.format
             width, height = img.size
-            if width < MIN_INPUT_IMAGE_LENGTH or height < MIN_INPUT_IMAGE_LENGTH:
-                raise ValueError(
-                    'The minimum length of the input image is too short. Min image length: ' +
-                    f'{MIN_INPUT_IMAGE_LENGTH}, request input image min length: {min(width, height)}.'
-                )
+            new_width = width
+            new_height = height
+            if min(width, height) < MIN_INPUT_IMAGE_LENGTH:
+                if self.options.resize_image:
+                    resize = MIN_INPUT_IMAGE_LENGTH / min(width, height)
+                    new_width = int(width * resize + 0.5)
+                    new_height = int(height * resize + 0.5)
+                    if max(width, height) > MAX_INPUT_IMAGE_LENGTH:
+                        raise ValueError(
+                            'The minimum length of the input image is too short. Minimum image length: ' +
+                            f'{MIN_INPUT_IMAGE_LENGTH}, request input image minimum length: {min(width, height)}.\n' +
+                            'Unable to resize the image because then the maximum length would become too long.'
+                        )
+                else:
+                    raise ValueError(
+                        'The minimum length of the input image is too short. Minimum image length: ' +
+                        f'{MIN_INPUT_IMAGE_LENGTH}, request input image minimum length: {min(width, height)}.'
+                    )
             if width > MAX_INPUT_IMAGE_LENGTH or height > MAX_INPUT_IMAGE_LENGTH:
-                # Resize the image while preserving the aspect ratio
-                img.thumbnail((MAX_INPUT_IMAGE_LENGTH, MAX_INPUT_IMAGE_LENGTH))
+                if self.options.resize_image:
+                    resize = MAX_INPUT_IMAGE_LENGTH / max(width, height)
+                    new_width = int(width * resize)
+                    new_height = int(height * resize)
+                else:
+                    raise ValueError(
+                        'The maximum length of the input image is too long. Maximum image length: ' +
+                        f'{MAX_INPUT_IMAGE_LENGTH}, request input image maximum length: {max(width, height)}.'
+                    )
+            if new_width != width or new_height != height:
+                # Resize the image if needed
+                img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
 
             # Change format if necessary
             if (
                 img_format.lower() in SUPPORTED_INPUT_IMAGE_FORMATS and
                 img.size == (width, height)  # Original size, no resize needed
             ):
-                return base64.b64encode(img_bytes).decode('utf8')
+                return base64.b64encode(img_bytes).decode('utf8'), (width, height)
 
             # If not, re-export the image with the appropriate format
             with BytesIO() as buffer:
                 img.save(buffer, format='PNG')
-                return base64.b64encode(buffer.getvalue()).decode('utf8')
+                return base64.b64encode(buffer.getvalue()).decode('utf8'), (new_width, new_height)
 
     def generate_text_image_params(self, prompt_text):
         """
@@ -568,16 +692,107 @@ class BedrockTitanImage(llm.Model):
             text_to_image_params['negativeText'] = self.options.negative_prompt
 
         # Support for V2 condition images.
-        if self.options.condition_image:
-            if 'condition_image' not in MODEL_ID_TO_EXTRA_OPTIONS[self.model_id]:
-                raise ValueError(f'The condition_image option is not supported with the {self.model_id} model.')
+        if self.options.image:
+            if 'image' not in MODEL_ID_TO_EXTRA_OPTIONS[self.model_id]:
+                raise ValueError(f'Condition images are not supported with the {self.model_id} model.')
 
-            text_to_image_params['conditionImage'] = self.load_and_preprocess_image(self.options.condition_image)
+            image_b64, _ = self.load_and_preprocess_image(self.options.image)
+            text_to_image_params['conditionImage'] = image_b64
 
-        text_to_image_params['controlMode'] = self.options.control_mode
-        text_to_image_params['controlStrength'] = self.options.control_strength
+            text_to_image_params['controlMode'] = self.options.control_mode
+            text_to_image_params['controlStrength'] = self.options.control_strength
 
         return text_to_image_params
+
+    def generate_painting_params(self, prompt_text):
+        """
+        Generate the shared portion of a Titan Image Generator parameter dict for INPAINTING and
+        OUTPAINTING tasks.
+        """
+        if self.options.mask_image and self.options.mask_prompt:
+            raise ValueError('Only one of mask_image or mask_prompt can be provided for IN/OUTPAINTING tasks.')
+        if not self.options.mask_image and not self.options.mask_prompt:
+            raise ValueError('Either mask_image or mask_prompt must be provided for IN/OUTPAINTING tasks.')
+        if not self.options.image:
+            raise ValueError('An input image is required for IN/OUTPAINTING tasks.')
+
+        image_b64, image_size = self.load_and_preprocess_image(self.options.image)
+        painting_params = {
+            'image': image_b64,
+        }
+
+        if prompt_text:  # prompt is optional, in this case, the model will fill in the mask.
+            painting_params['text'] = prompt_text
+
+        if self.options.negative_prompt:
+            painting_params['negativeText'] = self.options.negative_prompt
+
+        if self.options.mask_prompt:
+            painting_params['maskPrompt'] = self.options.mask_prompt
+
+        if self.options.mask_image:
+            mask_image_b64, mask_image_size = self.load_and_preprocess_image(self.options.mask_image)
+            if mask_image_size != image_size:
+                raise ValueError('The mask image must have the same size as the input image.')
+            painting_params['maskImage'] = mask_image_b64
+
+        if self.options.return_mask:
+            painting_params['returnMask'] = self.options.return_mask
+
+        return painting_params
+
+    def generate_inpainting_params(self, prompt_text):
+        """
+        Generate a Titan Image Generator parameter dict for INPAINTING tasks.
+        """
+        return self.generate_painting_params(prompt_text)
+
+    def generate_outpainting_params(self, prompt_text):
+        """
+        Generate a Titan Image Generator parameter dict for OUTPAINTING tasks.
+        """
+        out_painting_params = self.generate_painting_params(prompt_text)
+        out_painting_params['outPaintingMode'] = self.options.outpainting_mode
+        return out_painting_params
+
+    def generate_image_variation_params(self, prompt_text):
+        """
+        Generate the IMAGE_VARIATION specific parameter block out of the given prompt text, using any options available
+        from the object’s options object.
+        """
+        if not self.options.image and not self.options.images:
+            raise ValueError(f'IMAGE_VARIATION_TASKS require at least one -o image or -o images option.')
+
+        image_paths = []
+        if self.options.image:
+            image_paths.append(os.path.expanduser(self.options.image))
+
+        if self.options.images:
+            for i in self.options.images.split(','):
+                image_paths.append(os.path.expanduser(i))
+
+        if not image_paths:
+            raise ValueError('The IMAGE_VARIATION task requires a minimum of 1 input image.')
+
+        if len(image_paths) > MAX_INPUT_IMAGES_FOR_VARIATION:
+            raise ValueError(
+                f'The IMAGE_VARIATION task only supports a maximum of {MAX_INPUT_IMAGES_FOR_VARIATION} images.'
+            )
+
+        images = []
+        for i in image_paths:
+            image_b64, _ = self.load_and_preprocess_image(i)
+            images.append(image_b64)
+
+        image_variation_params = {
+            'text': prompt_text,
+            'images': images,
+            'similarityStrength': self.options.similarity_strength,
+        }
+        if self.options.negative_prompt:
+            image_variation_params['negativeText'] = self.options.negative_prompt
+
+        return image_variation_params
 
     @staticmethod
     def parse_colors(colors):
@@ -606,9 +821,6 @@ class BedrockTitanImage(llm.Model):
         Generate the COLOR_GUIDED_GENERATION specific parameter block out of the given options object.
         Assumes that any options are available from self.options.
         """
-        if 'COLOR_GUIDED_GENERATION' not in MODEL_ID_TO_TASK_TYPES[self.model_id]:
-            raise ValueError(f'The COLOR_GUIDED_GENERATION option is not supported with the {self.model_id} model.')
-
         if not self.options.colors:
             raise ValueError(
                 'A set of colors to guide the image generation process with is required for COLOR_GUIDED_GENERATION ' +
@@ -622,12 +834,43 @@ class BedrockTitanImage(llm.Model):
         if self.options.negative_prompt:
             color_guided_generation_params['negativeText'] = self.options.negative_prompt
 
-        if self.options.reference_image:
-            color_guided_generation_params['referenceImage'] = self.load_and_preprocess_image(
-                self.options.reference_image
-            )
+        if self.options.image:
+            image_b64, _ = self.load_and_preprocess_image(self.options.image)
+            color_guided_generation_params['referenceImage'] = image_b64
 
         return color_guided_generation_params
+
+    def generate_background_removal_params(self):
+        """
+        Generate the BACKGROUND_REMOVAL specific parameter block for background removal tasks.
+        This task does not use any prompt text.
+        Assumes that any options are available from self.options.
+        """
+        if self.options.image:
+            image_b64, _ = self.load_and_preprocess_image(self.options.image)
+            return {
+                'image': image_b64
+            }
+        else:
+            ValueError('An input image is required for BACKGROUND_REMOVAL tasks.')
+
+    def generate_detect_generated_content_params(self):
+        """
+        Create a params dict (not just a sub-dict like in the other cases) for the Bedrock
+        detect_generated_content() API (preview).
+
+        See also: https://aws.amazon.com/de/blogs/aws/
+        amazon-titan-image-generator-and-watermark-detection-api-are-now-available-in-amazon-bedrock/
+
+        As of 2024-08-21, this feature is in preview and requires a special preview SDK which is not generally
+        available yet. So we’ll leave this as is for now until it becomes more widely available.
+        """
+        with open(self.options.image, "rb") as image_file:
+            input_image = image_file.read()
+
+        return {
+            "imageContent": {"bytes": input_image}
+        }
 
     def prompt_to_titan_params(self, prompt):
         """
@@ -635,13 +878,19 @@ class BedrockTitanImage(llm.Model):
         :param prompt: A llm prompt object.
         :return: A dict of Bedrock Titan image parameters.
         """
+        # Verify that we support the given task.
+        task_type = prompt.options.task
+        if task_type not in MODEL_ID_TO_TASK_TYPES[self.model_id]:
+            raise ValueError(
+                f'The {task_type} task type is not supported with the {self.model_id} model.'
+            )
 
         # Build and validate the text prompt. Combine it with the system prompt if any.
         prompt_text = prompt.prompt
         if prompt.system:
             prompt_text = prompt.system + ' ' + prompt_text
 
-        if not prompt_text.strip():
+        if not prompt_text.strip() and prompt.options.task not in TASKS_WITH_NO_PROMPT_NEEDED:
             raise ValueError('Prompt cannot be empty.')
         if len(prompt_text) > MAX_PROMPT_LENGTH:
             raise ValueError(
@@ -657,6 +906,7 @@ class BedrockTitanImage(llm.Model):
             )
 
         params = {
+            'taskType': task_type,
             'imageGenerationConfig': {
                 'width': size[0],
                 'height': size[1],
@@ -667,13 +917,20 @@ class BedrockTitanImage(llm.Model):
             }
         }
 
-        task_type = prompt.options.task
         if task_type == 'TEXT_IMAGE':
-            params['taskType'] = task_type
             params['textToImageParams'] = self.generate_text_image_params(prompt_text)
+        elif task_type == 'INPAINTING':
+            params['inPaintingParams'] = self.generate_inpainting_params(prompt_text)
+        elif task_type == 'OUTPAINTING':
+            params['outPaintingParams'] = self.generate_outpainting_params(prompt_text)
+        elif task_type == 'IMAGE_VARIATION':
+            params['imageVariationParams'] = self.generate_image_variation_params(prompt_text)
         elif task_type == 'COLOR_GUIDED_GENERATION':
-            params['taskType'] = task_type
             params['colorGuidedGenerationParams'] = self.generate_color_guided_generation_params(prompt_text)
+        elif task_type == 'BACKGROUND_REMOVAL':
+            params['backgroundRemovalParams'] = self.generate_background_removal_params()
+        # elif task_type == 'DETECT_GENERATED_CONTENT':
+        #     params = self.generate_detect_generated_content_params()
         else:
             raise ValueError(f'Invalid task type {task_type}.')
 
@@ -682,16 +939,16 @@ class BedrockTitanImage(llm.Model):
         return params
 
     @staticmethod
-    def prompt_to_filename(prompt):
+    def prompt_text_to_filename(text):
         """
-        Generate a file name out of the given prompt object by replacing any non-alphanumeric
+        Generate a file name out of the given prompt text by replacing any non-alphanumeric
         character including spaces with underscore, then eliminating multiple underscores.
-        :param prompt: A llm prompt object.
+        :param text: A prompt text.
         :return: A file name string.
         """
         base = ""
         ext = ".png"
-        for c in prompt.prompt:
+        for c in text:
             if c.isalnum():
                 base += c
             else:
@@ -701,6 +958,8 @@ class BedrockTitanImage(llm.Model):
             base = base.replace("__", "_")
 
         base = base.strip('_')
+        if not base:
+            base = "result"
 
         # Avoid overwriting existing files with the same name.
         i = 1
@@ -764,6 +1023,24 @@ class BedrockTitanImage(llm.Model):
 
         raise ValueError('AWS_DEFAULT_REGION not supported or accessible, no more regions left to try.')
 
+    def process_response_images(self, response_body, prompt):
+        """
+        Process all images contained in the given response body. Use the given prompt to generate
+        appropriate file names. yield processed file names while processing.
+        Remove them from the body after processing to avoid bulk when logging the rest.
+        """
+        for i, image_data in enumerate(response_body.get("images")):
+            image_bytes = base64.b64decode(image_data)
+            image_filename = self.prompt_text_to_filename(prompt.prompt)
+            with open(image_filename, "wb") as fp:
+                fp.write(image_bytes)
+
+            if prompt.options.auto_open:
+                self.open_file(image_filename)
+
+            response_body['images'][i] = f'<image data {i + 1}>'
+            yield image_filename
+
     def execute(self, prompt, stream, response, conversation):
         """
         Take the prompt and run it through our model. Return a response in streaming
@@ -792,6 +1069,7 @@ class BedrockTitanImage(llm.Model):
 
             bedrock = boto3.client('bedrock-runtime', region_name=region)
             print_debug('Prompt body', params)
+
             try:
                 bedrock_response = bedrock.invoke_model(
                     modelId=self.model_id,
@@ -799,6 +1077,7 @@ class BedrockTitanImage(llm.Model):
                     accept="application/json",
                     body=json.dumps(params)
                 )
+
                 self.successful_region = region
                 break
             except bedrock.exceptions.AccessDeniedException:
@@ -810,36 +1089,39 @@ class BedrockTitanImage(llm.Model):
 
         response_body = json.loads(bedrock_response.get("body").read())
 
-        # Process each image and remove them from the body, so we can log the rest without the
-        # bulky image data.
-
-        file_names = []
-        for i, image_data in enumerate(response_body.get("images")):
-            image_bytes = base64.b64decode(image_data)
-            image_filename = self.prompt_to_filename(prompt)
-            with open(image_filename, "wb") as fp:
-                fp.write(image_bytes)
-
-            if prompt.options.auto_open:
-                self.open_file(image_filename)
-
-            response_body['images'][i] = f'<image data {i + 1}>'
-
-            file_names.append(image_filename)
+        # Process images in the response body. This will also remove them to make the burden lighter for logging.
+        image_filenames = []
+        for image_filename in self.process_response_images(response_body, prompt):
+            image_filenames.append(image_filename)
             if stream:
                 yield f"Image written to: {image_filename}\n"
 
+        # Save any returned mask image as well and remove it for logging.
+        mask_image_filename = None
+        if 'maskImage' in response_body:
+            mask_image_bytes = base64.b64decode(response_body['maskImage'])
+            mask_image_filename = self.prompt_text_to_filename(prompt.prompt + ' mask')
+            with open(mask_image_filename, "wb") as fp:
+                fp.write(mask_image_bytes)
+            response_body['maskImage'] = '<mask image>'
+
+            if stream:
+                yield f'Mask image written to: {mask_image_filename}\n'
+
         # Log the rest of the response body in case there's more useful information in it.
         response.response_json = json.dumps(response_body)
+
         if not stream:
-            if len(file_names) == 1:
+            if len(image_filenames) == 1:
                 yield (
-                    f'Image generated in the {region} Region ({region_reason}) ' +
-                    f'and written to: {file_names[0]}.\n'
+                        f'Image generated in the {region} Region ({region_reason}) ' +
+                        f'and written to: {image_filenames[0]}.\n'
                 )
             else:
                 yield (
-                    f'Images generated in the {region} region ({region_reason}.\n' +
-                    'Images written to:\n' +
-                    f'{"\n    ".join(file_names)}\n'
+                        f'Images generated in the {region} region ({region_reason}.\n' +
+                        'Images written to:\n' +
+                        f'{"\n    ".join(image_filenames)}\n'
                 )
+            if mask_image_filename:
+                yield f'Mask image written to: {mask_image_filename}\n'
