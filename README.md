@@ -83,7 +83,7 @@ llm -m ati "A parrot."
 If everything is set up correctly, this will generate an image of a parrot, save it as "A_parrot.png" in your
 current file system path, and open it with your operating system’s default image display app:
 
-![A parrot.](A_parrot.png)
+![A parrot.](https://github.com/zalez/llm-bedrock-titan-image/blob/main/A_parrot.png)
 
 If a file with the same name exists already (likely, since this repository has one), this plugin will choose an unused
 version of the filename, like ```A_parrot_1.png```.
