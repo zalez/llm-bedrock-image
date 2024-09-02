@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "llm-bedrock-titan-image"
-version = "1.0.3"
+version = "1.0.4"
 description = "An LLM plugin for supporting Amazon Titan image generators on Amazon Bedrock."
 readme = "README.md"
 authors = [{name = "Constantin Gonzalez"}]

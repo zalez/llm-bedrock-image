@@ -120,7 +120,7 @@ MODEL_ID_TO_MODEL_NAME = {
 MODEL_ID_TO_EXTRA_OPTIONS = {
     'amazon.titan-image-generator-v1': [],
     'amazon.titan-image-generator-v2:0': [
-        'control_mode', 'control_strength'
+        'image', 'control_mode', 'control_strength'
     ]
 }
 
