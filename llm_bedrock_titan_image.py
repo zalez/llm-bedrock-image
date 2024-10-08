@@ -948,7 +948,8 @@ class BedrockTitanImage(llm.Model):
         """
         base = ""
         ext = ".png"
-        for c in text:
+        limited_text = ' '.join(text.split()[:5])  # Limit words to 5.
+        for c in limited_text:
             if c.isalnum():
                 base += c
             else:
